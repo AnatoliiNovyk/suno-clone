@@ -5,6 +5,6 @@ docker-compose up --build -d
 Start-Sleep -Seconds 10
 
 # Открываем фронтенд в браузере по умолчанию
-Start-Process "http://localhost:5173"
+Start-Process "http://localhost:5174"
 
-Write-Host "Suno AI Clone запущен. Frontend: http://localhost:5173"
+Write-Host "Suno AI Clone запущен. Frontend: http://localhost:5174"

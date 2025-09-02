@@ -7,7 +7,7 @@ sleep 10
 
 # Открываем фронтенд в браузере по умолчанию
 if command -v xdg-open > /dev/null; then
-  xdg-open http://localhost:5173
+  xdg-open http://localhost:5174
 elif command -v open > /dev/null; then
   open http://localhost:5173
 else
