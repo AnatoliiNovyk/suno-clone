@@ -1,0 +1,303 @@
+import React, { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { Sparkles, Loader2, Music, ChevronDown, ChevronUp, Mic, Upload, Wand2 } from 'lucide-react';
+import { useAuth } from '../contexts/AuthContext';
+import { supabase } from '../lib/supabase';
+
+const genres = [
+  'Pop', 'Rock', 'Hip-Hop', 'Electronic', 'Jazz', 'Classical', 'Country', 'R&B',
+  'Reggae', 'Metal', 'Folk', 'Blues', 'Indie', 'Punk', 'Soul', 'Funk',
+  'Disco', 'House', 'Techno', 'Ambient', 'Lo-Fi', 'Synthwave', 'Orchestral'
+];
+
+const moods = ['Happy', 'Sad', 'Energetic', 'Calm', 'Dark', 'Uplifting', 'Romantic', 'Mysterious'];
+
+export function AdvancedPage() {
+  const navigate = useNavigate();
+  const { user, refreshUser } = useAuth();
+  
+  const [prompt, setPrompt] = useState('');
+  const [lyrics, setLyrics] = useState('');
+  const [selectedGenre, setSelectedGenre] = useState('');
+  const [selectedMood, setSelectedMood] = useState('');
+  const [instrumental, setInstrumental] = useState(false);
+  const [autoLyrics, setAutoLyrics] = useState(true);
+  
+  const [expandedSections, setExpandedSections] = useState({
+    lyrics: true,
+    style: false,
+    audio: false
+  });
+  
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [error, setError] = useState('');
+
+  const toggleSection = (section: keyof typeof expandedSections) => {
+    setExpandedSections(prev => ({ ...prev, [section]: !prev[section] }));
+  };
+
+  const handleGenerate = async () => {
+    if (!user) {
+      navigate('/login');
+      return;
+    }
+
+    if (user.credits < 10) {
+      setError('Недостатньо кредитів');
+      return;
+    }
+
+    setIsGenerating(true);
+    setError('');
+
+    try {
+      const { data, error: fnError } = await supabase.functions.invoke('generate-music', {
+        body: {
+          prompt,
+          lyrics: autoLyrics ? '' : lyrics,
+          genre: selectedGenre,
+          instrumental
+        }
+      });
+
+      if (fnError) throw fnError;
+
+      if (data?.data?.track) {
+        await refreshUser();
+        navigate('/library');
+      }
+    } catch (err: any) {
+      setError(err.message || 'Помилка генерації');
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-neutral-900 pt-24 pb-32">
+      <div className="max-w-2xl mx-auto px-4">
+        {/* Header */}
+        <div className="mb-8">
+          <button
+            onClick={() => navigate(-1)}
+            className="text-sm text-neutral-100 hover:text-neutral-50 mb-4"
+          >
+            Назад
+          </button>
+          <h1 className="text-3xl font-bold text-neutral-50">
+            Розширений режим
+          </h1>
+          <p className="text-neutral-100 mt-2">
+            Повний контроль над створенням музики
+          </p>
+        </div>
+
+        {/* Prompt */}
+        <div className="mb-6">
+          <label className="block text-sm font-medium text-neutral-100 mb-2">
+            Опис музики
+          </label>
+          <textarea
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            placeholder="Опиши музику, яку хочеш створити..."
+            rows={3}
+            className="w-full bg-neutral-700 border border-neutral-500 rounded-xl px-4 py-3 text-neutral-50 placeholder:text-neutral-300 focus:outline-none focus:border-primary-500 resize-none"
+          />
+        </div>
+
+        {/* Lyrics Section */}
+        <div className="mb-4 bg-neutral-700/50 rounded-xl border border-white/10 overflow-hidden">
+          <button
+            onClick={() => toggleSection('lyrics')}
+            className="w-full flex items-center justify-between px-4 py-4"
+          >
+            <div className="flex items-center gap-3">
+              <Music className="w-5 h-5 text-primary-500" />
+              <span className="font-medium text-neutral-50">Текст пісні</span>
+            </div>
+            {expandedSections.lyrics ? (
+              <ChevronUp className="w-5 h-5 text-neutral-100" />
+            ) : (
+              <ChevronDown className="w-5 h-5 text-neutral-100" />
+            )}
+          </button>
+          
+          {expandedSections.lyrics && (
+            <div className="px-4 pb-4 space-y-4">
+              <div className="flex items-center gap-4">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={instrumental}
+                    onChange={(e) => setInstrumental(e.target.checked)}
+                    className="w-4 h-4 rounded border-neutral-500 text-primary-500 focus:ring-primary-500"
+                  />
+                  <span className="text-sm text-neutral-100">Інструментальна</span>
+                </label>
+              </div>
+
+              {!instrumental && (
+                <>
+                  <div className="flex items-center gap-4">
+                    <button
+                      onClick={() => setAutoLyrics(true)}
+                      className={`px-4 py-2 rounded-full text-sm font-medium ${
+                        autoLyrics
+                          ? 'bg-primary-500 text-white'
+                          : 'bg-neutral-700 text-neutral-100 border border-white/10'
+                      }`}
+                    >
+                      Авто-текст
+                    </button>
+                    <button
+                      onClick={() => setAutoLyrics(false)}
+                      className={`px-4 py-2 rounded-full text-sm font-medium ${
+                        !autoLyrics
+                          ? 'bg-primary-500 text-white'
+                          : 'bg-neutral-700 text-neutral-100 border border-white/10'
+                      }`}
+                    >
+                      Свій текст
+                    </button>
+                  </div>
+
+                  {!autoLyrics && (
+                    <textarea
+                      value={lyrics}
+                      onChange={(e) => setLyrics(e.target.value)}
+                      placeholder="Введіть текст пісні..."
+                      rows={6}
+                      className="w-full bg-neutral-700 border border-neutral-500 rounded-xl px-4 py-3 text-neutral-50 placeholder:text-neutral-300 focus:outline-none focus:border-primary-500 resize-none"
+                    />
+                  )}
+                </>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Style Section */}
+        <div className="mb-4 bg-neutral-700/50 rounded-xl border border-white/10 overflow-hidden">
+          <button
+            onClick={() => toggleSection('style')}
+            className="w-full flex items-center justify-between px-4 py-4"
+          >
+            <div className="flex items-center gap-3">
+              <Sparkles className="w-5 h-5 text-primary-500" />
+              <span className="font-medium text-neutral-50">Стиль та жанр</span>
+            </div>
+            {expandedSections.style ? (
+              <ChevronUp className="w-5 h-5 text-neutral-100" />
+            ) : (
+              <ChevronDown className="w-5 h-5 text-neutral-100" />
+            )}
+          </button>
+          
+          {expandedSections.style && (
+            <div className="px-4 pb-4 space-y-4">
+              <div>
+                <label className="block text-sm text-neutral-100 mb-2">Жанр</label>
+                <div className="flex flex-wrap gap-2">
+                  {genres.slice(0, 12).map((genre) => (
+                    <button
+                      key={genre}
+                      onClick={() => setSelectedGenre(genre === selectedGenre ? '' : genre)}
+                      className={`px-3 py-1.5 rounded-full text-sm ${
+                        selectedGenre === genre
+                          ? 'bg-primary-500 text-white'
+                          : 'bg-neutral-700 text-neutral-100 border border-white/10 hover:border-white/20'
+                      }`}
+                    >
+                      {genre}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              
+              <div>
+                <label className="block text-sm text-neutral-100 mb-2">Настрій</label>
+                <div className="flex flex-wrap gap-2">
+                  {moods.map((mood) => (
+                    <button
+                      key={mood}
+                      onClick={() => setSelectedMood(mood === selectedMood ? '' : mood)}
+                      className={`px-3 py-1.5 rounded-full text-sm ${
+                        selectedMood === mood
+                          ? 'bg-primary-500 text-white'
+                          : 'bg-neutral-700 text-neutral-100 border border-white/10 hover:border-white/20'
+                      }`}
+                    >
+                      {mood}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Audio Reference Section */}
+        <div className="mb-8 bg-neutral-700/50 rounded-xl border border-white/10 overflow-hidden">
+          <button
+            onClick={() => toggleSection('audio')}
+            className="w-full flex items-center justify-between px-4 py-4"
+          >
+            <div className="flex items-center gap-3">
+              <Upload className="w-5 h-5 text-primary-500" />
+              <span className="font-medium text-neutral-50">Аудіо референс</span>
+            </div>
+            {expandedSections.audio ? (
+              <ChevronUp className="w-5 h-5 text-neutral-100" />
+            ) : (
+              <ChevronDown className="w-5 h-5 text-neutral-100" />
+            )}
+          </button>
+          
+          {expandedSections.audio && (
+            <div className="px-4 pb-4 space-y-4">
+              <div className="flex gap-4">
+                <button className="flex-1 flex items-center justify-center gap-2 px-4 py-4 rounded-xl border-2 border-dashed border-neutral-500 text-neutral-100 hover:border-neutral-300 transition-colors">
+                  <Upload className="w-5 h-5" />
+                  <span className="text-sm">Завантажити файл</span>
+                </button>
+                <button className="flex-1 flex items-center justify-center gap-2 px-4 py-4 rounded-xl border-2 border-dashed border-neutral-500 text-neutral-100 hover:border-neutral-300 transition-colors">
+                  <Mic className="w-5 h-5" />
+                  <span className="text-sm">Записати</span>
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Error */}
+        {error && (
+          <p className="text-sm text-error mb-4">{error}</p>
+        )}
+
+        {/* Generate Button - Sticky */}
+        <div className="fixed bottom-0 left-0 right-0 p-4 bg-neutral-900/95 backdrop-blur-sm border-t border-white/10">
+          <div className="max-w-2xl mx-auto">
+            <button
+              onClick={handleGenerate}
+              disabled={isGenerating}
+              className="w-full flex items-center justify-center gap-2 px-6 py-4 rounded-full bg-gradient-to-r from-[#FF6B35] via-primary-500 to-primary-700 text-white font-semibold shadow-glow-orange hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+            >
+              {isGenerating ? (
+                <>
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                  Генерація...
+                </>
+              ) : (
+                <>
+                  <Wand2 className="w-5 h-5" />
+                  Створити (10 кредитів)
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

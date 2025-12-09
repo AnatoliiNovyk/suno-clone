@@ -1,0 +1,10 @@
+{
+  "tracks": [
+    {"id": "demo-1", "title": "Sunset Vibes", "genre": "Lo-Fi", "duration": 180},
+    {"id": "demo-2", "title": "Electric Dreams", "genre": "Synthwave", "duration": 210},
+    {"id": "demo-3", "title": "Ocean Waves", "genre": "Ambient", "duration": 240},
+    {"id": "demo-4", "title": "City Lights", "genre": "Jazz", "duration": 195},
+    {"id": "demo-5", "title": "Mountain High", "genre": "Folk", "duration": 165}
+  ],
+  "note": "Demo tracks for testing. Real AI generation requires API integration."
+}
