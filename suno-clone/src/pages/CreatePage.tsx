@@ -42,14 +42,37 @@ export function CreatePage() {
     setError('');
 
     try {
+      // DEV MODE: Call local Python service directly because Docker is not running
+      // Original: 
+      /*
       const { data, error: fnError } = await supabase.functions.invoke('generate-music', {
         body: { prompt, genre: 'pop' }
       });
+      */
+      
+      const response = await fetch('http://localhost:8000/generate-music', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          prompt: prompt,
+          genre: 'pop',
+          user_id: user.id
+        })
+      });
 
-      if (fnError) throw fnError;
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || 'Service error');
+      }
 
-      if (data?.data?.track) {
-        setGeneratedTrack(data.data.track);
+      const data = await response.json();
+
+      // Only update local state if track data returned
+      if (data?.track) {
+        setGeneratedTrack(data.track);
+        // Refresh to show updated credits
         await refreshUser();
       }
     } catch (err: any) {

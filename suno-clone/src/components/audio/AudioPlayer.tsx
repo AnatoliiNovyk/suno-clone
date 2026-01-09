@@ -14,6 +14,9 @@ export function AudioPlayer({ track, onClose }: AudioPlayerProps) {
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(0.7);
   const [isMuted, setIsMuted] = useState(false);
+  const [playbackError, setPlaybackError] = useState<string | null>(null);
+
+  const isPlayable = Boolean(track?.audio_url) && track?.status === 'completed';
 
   useEffect(() => {
     if (audioRef.current) {
@@ -26,17 +29,36 @@ export function AudioPlayer({ track, onClose }: AudioPlayerProps) {
       audioRef.current.load();
       setIsPlaying(false);
       setCurrentTime(0);
+      setDuration(0);
+      setPlaybackError(null);
     }
   }, [track]);
 
-  const togglePlay = () => {
-    if (audioRef.current) {
-      if (isPlaying) {
-        audioRef.current.pause();
+  const togglePlay = async () => {
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    if (!isPlayable) {
+      if (track?.status === 'failed') {
+        setPlaybackError('Генерація треку не вдалася.');
       } else {
-        audioRef.current.play();
+        setPlaybackError('Трек ще генерується. Зачекайте…');
       }
-      setIsPlaying(!isPlaying);
+      return;
+    }
+
+    setPlaybackError(null);
+
+    try {
+      if (audio.paused) {
+        await audio.play();
+      } else {
+        audio.pause();
+      }
+    } catch (err) {
+      console.error('Audio playback error:', err);
+      setIsPlaying(false);
+      setPlaybackError('Не вдалося відтворити трек. Спробуйте ще раз.');
     }
   };
 
@@ -50,6 +72,23 @@ export function AudioPlayer({ track, onClose }: AudioPlayerProps) {
     if (audioRef.current) {
       setDuration(audioRef.current.duration);
     }
+  };
+
+  const handleAudioError = () => {
+    const audio = audioRef.current;
+    const code = audio?.error?.code;
+
+    console.error('Audio element error:', {
+      code,
+      currentSrc: audio?.currentSrc,
+      src: audio?.src,
+      networkState: audio?.networkState,
+      readyState: audio?.readyState,
+    });
+
+    setIsPlaying(false);
+    setDuration(0);
+    setPlaybackError('Помилка завантаження аудіо.');
   };
 
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -72,9 +111,14 @@ export function AudioPlayer({ track, onClose }: AudioPlayerProps) {
     <div className="fixed bottom-0 left-0 right-0 z-50 bg-neutral-700/80 backdrop-blur-[40px] border-t border-white/10 shadow-modal">
       <audio
         ref={audioRef}
-        src={track.audio_url || ''}
+        src={track.audio_url || undefined}
+        preload="metadata"
+        crossOrigin="anonymous"
         onTimeUpdate={handleTimeUpdate}
         onLoadedMetadata={handleLoadedMetadata}
+        onPlay={() => setIsPlaying(true)}
+        onPause={() => setIsPlaying(false)}
+        onError={handleAudioError}
         onEnded={() => setIsPlaying(false)}
       />
 
@@ -99,16 +143,29 @@ export function AudioPlayer({ track, onClose }: AudioPlayerProps) {
         {/* Controls */}
         <div className="flex-1 flex flex-col items-center gap-2">
           <div className="flex items-center gap-4">
-            <button className="p-2 text-neutral-100 hover:text-neutral-50 transition-colors">
+            <button
+              className="p-2 text-neutral-100 hover:text-neutral-50 transition-colors"
+              aria-label="Попередній трек"
+            >
               <SkipBack className="w-5 h-5" />
             </button>
             <button
               onClick={togglePlay}
-              className="w-10 h-10 rounded-full bg-neutral-50 text-neutral-900 flex items-center justify-center hover:scale-105 transition-transform"
+              disabled={!isPlayable}
+              aria-label={isPlayable ? (isPlaying ? 'Пауза' : 'Відтворити') : 'Трек ще не готовий'}
+              className={
+                "w-10 h-10 rounded-full flex items-center justify-center transition-transform " +
+                (isPlayable
+                  ? "bg-neutral-50 text-neutral-900 hover:scale-105"
+                  : "bg-neutral-500 text-neutral-300 cursor-not-allowed")
+              }
             >
               {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5 ml-0.5" />}
             </button>
-            <button className="p-2 text-neutral-100 hover:text-neutral-50 transition-colors">
+            <button
+              className="p-2 text-neutral-100 hover:text-neutral-50 transition-colors"
+              aria-label="Наступний трек"
+            >
               <SkipForward className="w-5 h-5" />
             </button>
           </div>
@@ -123,12 +180,26 @@ export function AudioPlayer({ track, onClose }: AudioPlayerProps) {
               max={duration || 0}
               value={currentTime}
               onChange={handleSeek}
+              disabled={!isPlayable || duration === 0}
+              aria-label="Позиція відтворення"
               className="flex-1 h-1 bg-neutral-500 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-primary-500"
             />
             <span className="text-xs text-neutral-100 w-10">
               {formatTime(duration)}
             </span>
           </div>
+
+          {playbackError && (
+            <div className="text-xs text-error mt-1">
+              {playbackError}
+            </div>
+          )}
+
+          {!isPlayable && !playbackError && (
+            <div className="text-xs text-neutral-300 mt-1">
+              {track.status === 'failed' ? 'Генерація завершилась помилкою.' : 'Генерація…'}
+            </div>
+          )}
         </div>
 
         {/* Volume */}
@@ -146,6 +217,7 @@ export function AudioPlayer({ track, onClose }: AudioPlayerProps) {
             step="0.01"
             value={isMuted ? 0 : volume}
             onChange={(e) => setVolume(parseFloat(e.target.value))}
+            aria-label="Гучність"
             className="flex-1 h-1 bg-neutral-500 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-neutral-50"
           />
         </div>

@@ -1,3 +1,6 @@
+
+import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
+
 Deno.serve(async (req) => {
   const corsHeaders = {
     'Access-Control-Allow-Origin': '*',
@@ -11,7 +14,7 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const { prompt, lyrics, genre, instrumental } = await req.json();
+    const { prompt, lyrics, genre } = await req.json();
 
     if (!prompt && !lyrics) {
       throw new Error('Prompt or lyrics required');
@@ -19,6 +22,9 @@ Deno.serve(async (req) => {
 
     const supabaseUrl = Deno.env.get('SUPABASE_URL');
     const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+    
+    // Python Service URL (Default to localhost for hybrid dev)
+    const pythonServiceUrl = Deno.env.get('PYTHON_SERVICE_URL') || 'http://127.0.0.1:8000';
 
     if (!supabaseUrl || !serviceRoleKey) {
       throw new Error('Missing Supabase configuration');
@@ -65,47 +71,12 @@ Deno.serve(async (req) => {
       throw new Error('Insufficient credits. You need at least 10 credits to generate music.');
     }
 
-    // Generate a mock track (in production, this would call an AI API)
     const trackId = crypto.randomUUID();
     const title = prompt?.slice(0, 50) || 'Generated Track';
-    
-    // Simulate processing time
-    await new Promise(resolve => setTimeout(resolve, 2000));
 
-    // Create track record
-    const trackData = {
-      id: trackId,
-      user_id: userId,
-      title: title,
-      prompt: prompt || '',
-      lyrics: lyrics || '',
-      genre: genre || 'pop',
-      audio_url: `https://mwsigocoyiuywrrrgjcv.supabase.co/storage/v1/object/public/audio/samples/demo-${Math.floor(Math.random() * 5) + 1}.mp3`,
-      cover_url: `https://mwsigocoyiuywrrrgjcv.supabase.co/storage/v1/object/public/audio/covers/cover-${Math.floor(Math.random() * 3) + 1}.jpg`,
-      duration: Math.floor(Math.random() * 120) + 60,
-      status: 'completed',
-      is_public: false
-    };
-
-    const insertResponse = await fetch(`${supabaseUrl}/rest/v1/tracks`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${serviceRoleKey}`,
-        'apikey': serviceRoleKey,
-        'Content-Type': 'application/json',
-        'Prefer': 'return=representation'
-      },
-      body: JSON.stringify(trackData)
-    });
-
-    if (!insertResponse.ok) {
-      const errorText = await insertResponse.text();
-      throw new Error(`Failed to save track: ${errorText}`);
-    }
-
-    // Deduct credits
+    // 1. Deduct credits first
     const newCredits = profile.credits - 10;
-    await fetch(`${supabaseUrl}/rest/v1/profiles?id=eq.${userId}`, {
+    const creditUpdateResponse = await fetch(`${supabaseUrl}/rest/v1/profiles?id=eq.${userId}`, {
       method: 'PATCH',
       headers: {
         'Authorization': `Bearer ${serviceRoleKey}`,
@@ -114,6 +85,86 @@ Deno.serve(async (req) => {
       },
       body: JSON.stringify({ credits: newCredits })
     });
+
+    if (!creditUpdateResponse.ok) {
+        throw new Error('Failed to deduct credits');
+    }
+
+    // 2. Create pending track record
+    const pendingTrackData = {
+      id: trackId,
+      user_id: userId,
+      title: title,
+      prompt: prompt || '',
+      lyrics: lyrics || '',
+      genre: genre || 'pop',
+      status: 'pending',
+      is_public: false,
+      duration: 0
+    };
+
+    const trackInsertResponse = await fetch(`${supabaseUrl}/rest/v1/tracks`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${serviceRoleKey}`,
+        'apikey': serviceRoleKey,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=representation'
+      },
+      body: JSON.stringify(pendingTrackData)
+    });
+
+    if (!trackInsertResponse.ok) {
+      // Refund credits if track creation fails
+      await fetch(`${supabaseUrl}/rest/v1/profiles?id=eq.${userId}`, {
+            method: 'PATCH',
+            headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ credits: profile.credits })
+      });
+      throw new Error('Failed to create track record');
+    }
+
+    const trackData = await trackInsertResponse.json();
+
+    // 3. Call Python Proxy Service
+    try {
+        console.log(`Forwarding request to Python Service at ${pythonServiceUrl}`);
+        const proxyResponse = await fetch(`${pythonServiceUrl}/generate-music`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                prompt: prompt,
+                genre: genre || 'pop',
+                track_id: trackId,
+                user_id: userId
+            })
+        });
+
+        if (!proxyResponse.ok) {
+             const errText = await proxyResponse.text();
+             console.error('Python proxy error:', errText);
+             throw new Error('Music generation service failed to accept job');
+        }
+
+    } catch (err) {
+        console.error('Failed to call python proxy:', err);
+        
+        // Refund credits
+        await fetch(`${supabaseUrl}/rest/v1/profiles?id=eq.${userId}`, {
+            method: 'PATCH',
+            headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ credits: profile.credits }) 
+        });
+        
+        // Set track to failed
+        await fetch(`${supabaseUrl}/rest/v1/tracks?id=eq.${trackId}`, {
+             method: 'PATCH',
+             headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey, 'Content-Type': 'application/json' },
+             body: JSON.stringify({ status: 'failed' })
+        });
+
+        throw new Error('Generation service unavailable. Credits have been refunded.');
+    }
 
     // Log credit transaction
     await fetch(`${supabaseUrl}/rest/v1/credit_transactions`, {
@@ -131,12 +182,11 @@ Deno.serve(async (req) => {
       })
     });
 
-    const track = await insertResponse.json();
-
     return new Response(JSON.stringify({
       data: {
-        track: track[0],
-        credits_remaining: newCredits
+        track: trackData[0],
+        credits_remaining: newCredits,
+        message: "Generation started"
       }
     }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }

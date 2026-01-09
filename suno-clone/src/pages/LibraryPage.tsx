@@ -25,6 +25,35 @@ export function LibraryPage() {
     }
   }, [user, activeTab]);
 
+  useEffect(() => {
+    if (!user || !currentTrack) return;
+    if (currentTrack.status === 'completed' || currentTrack.status === 'failed') return;
+
+    let cancelled = false;
+    const interval = setInterval(async () => {
+      const { data, error } = await supabase
+        .from('tracks')
+        .select('*')
+        .eq('id', currentTrack.id)
+        .eq('user_id', user.id)
+        .maybeSingle();
+
+      if (cancelled || error || !data) return;
+
+      setCurrentTrack(data);
+      setTracks((prev) => prev.map((t) => (t.id === data.id ? data : t)));
+
+      if (data.status === 'completed' || data.status === 'failed') {
+        clearInterval(interval);
+      }
+    }, 2000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [user, currentTrack?.id]);
+
   const fetchTracks = async () => {
     if (!user) return;
 
