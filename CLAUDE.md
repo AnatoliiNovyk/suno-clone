@@ -17,23 +17,23 @@ These project-specific rules override default behavior and are enforced by the r
 A full-stack clone of Suno's AI music-generation experience:
 
 - **`suno-clone/`** — React 18 + TypeScript + Vite SPA (the user-facing app).
-- **`python-service/`** — FastAPI service that performs the **actual** music generation via Google Lyria RealTime. This is the live generation backend today.
+- **`python-service/`** — FastAPI service that performs the **actual** music generation via Google Lyria 3 Pro (Gemini Interactions API). This is the live generation backend today.
 - **`supabase/`** — Postgres schema (`tables/`), one RLS migration (`migrations/`), Storage, and Deno **edge functions** (`functions/`). Auth, DB, and Storage are used in production; the `generate-music` edge function is now **legacy** (superseded by `python-service`).
 - **`docs/`** — design system, tokens, and Suno UX analysis. **`imgs/`** — design/marketing assets. **`memories/`** — long-form progress log. **`changelogs/`** — per-change log (see rule 3).
 
-**Stack:** React 18, TypeScript, Vite 6, Tailwind CSS 3 + Radix UI, React Router 6, React Hook Form + Zod, `@supabase/supabase-js` | Supabase (Auth, Postgres, Storage, Deno Edge Functions) | FastAPI + `google-genai` (Lyria RealTime) | Stripe.
+**Stack:** React 18, TypeScript, Vite 6, Tailwind CSS 3 + Radix UI, React Router 6, React Hook Form + Zod, `@supabase/supabase-js` | Supabase (Auth, Postgres, Storage, Deno Edge Functions) | FastAPI + `google-genai` (Lyria 3 Pro via the Gemini Interactions API) | Stripe.
 
 ## Architecture & Data Flow
 
-### Current music-generation flow (Lyria via Python service)
+### Current music-generation flow (Lyria 3 via Python service)
 
 Both the simple flow (`CreatePage.tsx`) and the advanced flow (`AdvancedPage.tsx`) call the **local Python service directly**, not the Supabase edge function:
 
-1. Frontend `POST http://localhost:8000/generate-music` with `{ prompt, genre, user_id, ...advanced controls }` (see `GenerateRequest` in `python-service/main.py`).
-2. Service preflight-checks that `models/lyria-realtime-exp` is available for the API key (cached 10 min), then checks the user's `profiles.credits >= 10` and **deducts 10 credits** via Supabase REST.
+1. Frontend `POST http://localhost:8000/generate-music` with `{ prompt, genre, user_id, lyrics?, negative_prompt? }` (see `GenerateRequest` in `python-service/main.py`).
+2. Service runs a lightweight config preflight (`is_service_ready`: `GOOGLE_AI_API_KEY` + Supabase configured), then checks the user's `profiles.credits >= 10` and **deducts 10 credits** via Supabase REST.
 3. It inserts a `tracks` row with `status: 'pending'`, returns `202 accepted`, and runs generation in a FastAPI `BackgroundTask`.
-4. The background task opens a Lyria RealTime WebSocket session (`client.aio.live.music.connect`), streams ~30s of PCM, wraps it in a WAV header, uploads to Supabase Storage bucket `audio` at `generated/{user_id}/{track_id}.wav`, and updates the track to `status: 'completed'` with the public `audio_url`.
-5. On failure it sets `status: 'failed'` and **refunds** the 10 credits (best-effort).
+4. The background task calls **Google Lyria 3 Pro** (`await client.aio.interactions.create(model="lyria-3-pro-preview", input=<prompt+genre+lyrics/negative>, response_format={"type":"audio","mime_type":"audio/wav","delivery":"inline"})`), polling `interactions.get(id)` until the interaction is `completed`. This returns a full song (up to ~3 min, 44.1 kHz stereo, with vocals + generated lyrics). It base64-decodes `interaction.output_audio.data`, uploads to Supabase Storage bucket `audio` at `generated/{user_id}/{track_id}.{ext}` (ext derived from the returned `mime_type`), and updates the track to `status: 'completed'` with the public `audio_url`, parsed `duration`, and the generated `lyrics` (`interaction.output_text`).
+5. On failure it sets `status: 'failed'` and **refunds** the 10 credits (best-effort). A user without Lyria 3 access is charged then refunded (no model-availability preflight).
 6. Frontend calls `refreshUser()` to re-read credits, and the track surfaces in the Library.
 
 The service talks to Supabase through `SimpleSupabaseClient` (raw `httpx` REST calls with the service-role key) to avoid the heavy `supabase` Python dependency.
@@ -51,7 +51,7 @@ The service talks to Supabase through `SimpleSupabaseClient` (raw `httpx` REST c
 ### Backend (Supabase)
 
 - **Tables** (`supabase/tables/*.sql`): `profiles` (credits, plan), `tracks`, `credit_transactions`, `subscriptions`, `suno_plans`, `suno_subscriptions`. RLS enabled via `supabase/migrations/1765294229_enable_rls_policies.sql`.
-- **Storage**: public `audio` bucket. Demo assets at `samples/demo-{1..5}.mp3`; generated audio at `generated/{userId}/{trackId}.wav`.
+- **Storage**: public `audio` bucket. Demo assets at `samples/demo-{1..5}.mp3`; generated audio at `generated/{userId}/{trackId}.{ext}` (extension from Lyria 3's returned `mime_type`, e.g. `.wav`).
 - **Edge functions** (Deno, `supabase/functions/`): `create-subscription` (Stripe Checkout session), `stripe-webhook` (syncs subscription state), `create-admin-user`, `create-bucket-audio-temp`, and the legacy `generate-music`.
 
 ### Stripe subscription flow
@@ -110,7 +110,7 @@ supabase db push        # apply tables/ + migrations/
 ## Known Gaps / Caveats
 
 - **`localhost:8000` is hardcoded** in `CreatePage.tsx` and `AdvancedPage.tsx` — the Python service must be running locally for generation to work; there is no deployed generation URL wired in.
-- **Lyria RealTime access** — the Python service returns HTTP 503 (message in Ukrainian) if `models/lyria-realtime-exp` isn't available for the configured `GOOGLE_AI_API_KEY`.
+- **Lyria 3 access** — generation requires a `GOOGLE_AI_API_KEY` with access to `lyria-3-pro-preview`. There is no model-availability preflight: a key without access is charged 10 credits, generation fails, and the credits are refunded (best-effort).
 - **Stripe** — inactive until `STRIPE_SECRET_KEY`/webhook secret are set.
 - **No automated tests** — no test runner is configured; verify changes manually via the dev server and the Python service.
 - **RLS** — policies are enabled but not exhaustively tested for multi-tenant isolation.
@@ -126,7 +126,7 @@ supabase db push        # apply tables/ + migrations/
 ├── memories/                 # Long-form progress log (Ukrainian)
 ├── docs/                     # Design system, tokens, Suno UX analysis
 ├── imgs/                     # Design & marketing assets
-├── python-service/           # FastAPI Lyria generation backend (current)
+├── python-service/           # FastAPI Lyria 3 generation backend (current)
 │   ├── main.py               # /generate-music endpoint + background task
 │   └── refill_credits.py     # credit top-up helper
 ├── suno-clone/               # React + Vite frontend

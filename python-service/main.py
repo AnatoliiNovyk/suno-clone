@@ -1,10 +1,13 @@
 import os
 import asyncio
-import traceback
-import httpx
+import base64
 import struct
 import time
+import traceback
+import uuid
 from typing import Optional
+
+import httpx
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -17,6 +20,9 @@ load_dotenv(dotenv_path="../.env")
 GOOGLE_AI_API_KEY = os.getenv("GOOGLE_AI_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+
+# Google Lyria 3 (Pro) — full-song generation via the Gemini Interactions API.
+LYRIA_MODEL = "lyria-3-pro-preview"
 
 if not GOOGLE_AI_API_KEY:
     print("WARNING: GOOGLE_AI_API_KEY is missing")
@@ -103,121 +109,110 @@ class SimpleSupabaseClient:
 
 supabase_client = SimpleSupabaseClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY) if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY else None
 
-# Cache Lyria availability to avoid calling model list on every request.
-_lyria_availability_cache: dict[str, object] = {
-    "checked_at": 0.0,
-    "available": None,
-    "reason": None,
+
+def is_service_ready() -> tuple[bool, str | None]:
+    """Lightweight preflight run before charging credits.
+
+    The Lyria 3 Interactions API is generally available, so we no longer probe a
+    model-listing endpoint (Lyria 3 preview models are not reliably enumerated
+    there). We only verify the server is configured; any real access problem
+    surfaces during generation and triggers a credit refund.
+    """
+    if not GOOGLE_AI_API_KEY:
+        return False, "Missing GOOGLE_AI_API_KEY"
+    if not supabase_client:
+        return False, "Supabase unavailable"
+    return True, None
+
+
+# MIME type -> file extension for audio returned by Lyria 3.
+_AUDIO_EXT_BY_MIME = {
+    "audio/wav": "wav",
+    "audio/mp3": "mp3",
+    "audio/mpeg": "mp3",
+    "audio/ogg": "ogg",
+    "audio/ogg_opus": "ogg",
+    "audio/opus": "opus",
+    "audio/flac": "flac",
+    "audio/aac": "aac",
+    "audio/m4a": "m4a",
+    "audio/aiff": "aiff",
 }
 
 
-async def is_lyria_available() -> tuple[bool, str | None]:
-    now = time.time()
-    checked_at = float(_lyria_availability_cache.get("checked_at") or 0.0)
-    available = _lyria_availability_cache.get("available")
-    reason = _lyria_availability_cache.get("reason")
+def wav_duration_seconds(container: bytes) -> int:
+    """Best-effort duration (in whole seconds) parsed from a WAV container.
 
-    # Cache for 10 minutes
-    if available is not None and (now - checked_at) < 600:
-        return bool(available), reason if isinstance(reason, str) else None
-
-    if not GOOGLE_AI_API_KEY:
-        _lyria_availability_cache.update({"checked_at": now, "available": False, "reason": "Missing GOOGLE_AI_API_KEY"})
-        return False, "Missing GOOGLE_AI_API_KEY"
-
+    Returns 0 if the bytes are not a parseable PCM WAV.
+    """
     try:
-        # Lyria RealTime is an experimental model served via v1alpha.
-        # The models endpoint is paginated; we must follow nextPageToken.
-        target = "models/lyria-realtime-exp"
+        if len(container) < 12 or container[0:4] != b"RIFF" or container[8:12] != b"WAVE":
+            return 0
+        sample_rate = channels = bits = data_size = None
+        idx = 12
+        while idx + 8 <= len(container):
+            chunk_id = container[idx:idx + 4]
+            chunk_size = struct.unpack("<I", container[idx + 4:idx + 8])[0]
+            body = idx + 8
+            if chunk_id == b"fmt " and body + 16 <= len(container):
+                channels = struct.unpack("<H", container[body + 2:body + 4])[0]
+                sample_rate = struct.unpack("<I", container[body + 4:body + 8])[0]
+                bits = struct.unpack("<H", container[body + 14:body + 16])[0]
+            elif chunk_id == b"data":
+                data_size = chunk_size
+            idx = body + chunk_size + (chunk_size & 1)  # chunks are word-aligned
+        if sample_rate and channels and bits and data_size:
+            bytes_per_second = sample_rate * channels * (bits // 8)
+            if bytes_per_second > 0:
+                return int(data_size / bytes_per_second)
+    except Exception:
+        pass
+    return 0
 
-        next_page_token: str | None = None
-        async with httpx.AsyncClient(timeout=30.0) as http:
-            while True:
-                params = {"pageToken": next_page_token} if next_page_token else None
-                resp = await http.get(
-                    "https://generativelanguage.googleapis.com/v1alpha/models",
-                    headers={"x-goog-api-key": GOOGLE_AI_API_KEY},
-                    params=params,
-                )
-                if not resp.is_success:
-                    _lyria_availability_cache.update({
-                        "checked_at": now,
-                        "available": False,
-                        "reason": f"Model list failed: {resp.status_code}",
-                    })
-                    return False, f"Model list failed: {resp.status_code}"
 
-                data = resp.json()
-                names = [m.get("name", "") for m in data.get("models", []) if isinstance(m, dict)]
+def _extract_audio_content(interaction):
+    """Pull the AudioContent object out of a completed interaction.
 
-                if any(isinstance(n, str) and n == target for n in names):
-                    _lyria_availability_cache.update({"checked_at": now, "available": True, "reason": None})
-                    return True, None
-
-                next_page_token = data.get("nextPageToken")
-                if not isinstance(next_page_token, str) or not next_page_token:
-                    break
-
-        _lyria_availability_cache.update({
-            "checked_at": now,
-            "available": False,
-            "reason": "Lyria RealTime model is not available for this API key/project.",
-        })
-        return False, "Lyria RealTime model is not available for this API key/project."
-    except Exception as e:
-        _lyria_availability_cache.update({
-            "checked_at": now,
-            "available": False,
-            "reason": f"Model list exception: {type(e).__name__}",
-        })
-        return False, f"Model list exception: {type(e).__name__}"
-
-def create_wav_header(pcm_data: bytes, sample_rate: int = 24000, channels: int = 1, bits_per_sample: int = 16) -> bytes:
+    Prefers the top-level `output_audio`; falls back to scanning model-output
+    steps for an audio content block.
     """
-    Creates a standard WAV header for PCM data.
-    """
-    audio_format = 1  # PCM
-    byte_rate = sample_rate * channels * bits_per_sample // 8
-    block_align = channels * bits_per_sample // 8
-    data_size = len(pcm_data)
-    chunk_size = 36 + data_size
+    audio = getattr(interaction, "output_audio", None)
+    if audio is not None and getattr(audio, "data", None):
+        return audio
 
-    # Pack the header
-    return struct.pack(
-        '<4sI4s4sIHHIIHH4sI',
-        b'RIFF',
-        chunk_size,
-        b'WAVE',
-        b'fmt ',
-        16,             # Subchunk1Size
-        audio_format,
-        channels,
-        sample_rate,
-        byte_rate,
-        block_align,
-        bits_per_sample,
-        b'data',
-        data_size
-    )
+    steps = getattr(interaction, "steps", None) or []
+    for step in steps:
+        contents = getattr(step, "content", None) or []
+        for content in contents:
+            if getattr(content, "type", None) == "audio" and getattr(content, "data", None):
+                return content
+    return None
+
 
 class GenerateRequest(BaseModel):
     prompt: str
     genre: str
     user_id: str
 
-    # Optional Lyria RealTime controls (forwarded to LiveMusicGenerationConfig)
-    bpm: Optional[int] = None
-    guidance: Optional[float] = None
-    density: Optional[float] = None
-    brightness: Optional[float] = None
-    temperature: Optional[float] = None
-    top_k: Optional[int] = None
-    seed: Optional[int] = None
-    scale: Optional[str] = None
-    music_generation_mode: Optional[str] = None
-    mute_bass: Optional[bool] = None
-    mute_drums: Optional[bool] = None
-    only_bass_and_drums: Optional[bool] = None
+    # Optional Lyria 3 inputs
+    lyrics: Optional[str] = None
+    negative_prompt: Optional[str] = None
+
+
+def _build_input_text(prompt: str, genre: str, negative_prompt: str | None, lyrics: str | None) -> str:
+    parts: list[str] = []
+    if prompt and prompt.strip():
+        parts.append(prompt.strip())
+    if genre and genre.strip():
+        parts.append(f"Genre: {genre.strip()}.")
+    if negative_prompt and negative_prompt.strip():
+        parts.append(f"Avoid: {negative_prompt.strip()}.")
+
+    text = " ".join(parts).strip() or "Create an original song."
+    if lyrics and lyrics.strip():
+        text += f"\n\nUse these lyrics:\n{lyrics.strip()}"
+    return text
+
 
 async def generate_music_task(
     track_id: str,
@@ -225,209 +220,111 @@ async def generate_music_task(
     genre: str,
     user_id: str,
     *,
-    bpm: int | None = None,
-    guidance: float | None = None,
-    density: float | None = None,
-    brightness: float | None = None,
-    temperature: float | None = None,
-    top_k: int | None = None,
-    seed: int | None = None,
-    scale: str | None = None,
-    music_generation_mode: str | None = None,
-    mute_bass: bool | None = None,
-    mute_drums: bool | None = None,
-    only_bass_and_drums: bool | None = None,
+    lyrics: str | None = None,
+    negative_prompt: str | None = None,
 ):
-    print(f"[Task] Starting generation for track {track_id}")
-    
+    print(f"[Task] Starting Lyria 3 generation for track {track_id}")
+
     if not supabase_client:
         print("[Error] Supabase client not initialized")
         return
 
     try:
-        # 1. Update status to processing (already set to pending initially, but processing is next step)
+        # 1. Mark as processing
         await supabase_client.update_track_status(track_id, {"status": "processing"})
 
-        # 2. Generate music via Google Lyria RealTime (WebSocket streaming)
+        # 2. Generate a full song via Google Lyria 3 Pro (Gemini Interactions API).
         # Official docs: https://ai.google.dev/gemini-api/docs/music-generation
         from google import genai
-        from google.genai import types
 
-        duration_seconds = 30
-        sample_rate = 48000
-        channels = 2
-        bits_per_sample = 16
-        bytes_per_second = sample_rate * channels * (bits_per_sample // 8)
-        target_bytes = duration_seconds * bytes_per_second
+        input_text = _build_input_text(prompt, genre, negative_prompt, lyrics)
 
-        # Lyria RealTime is instrumental; keep the prompt music-focused.
-        prompt_text = f"{prompt}. Genre: {genre}. Instrumental music.".strip()
+        client = genai.Client(api_key=GOOGLE_AI_API_KEY)
 
-        client = genai.Client(
-            api_key=GOOGLE_AI_API_KEY,
-            http_options={"api_version": "v1alpha"},
+        interaction = await client.aio.interactions.create(
+            model=LYRIA_MODEL,
+            input=input_text,
+            response_format={
+                "type": "audio",
+                "mime_type": "audio/wav",
+                "delivery": "inline",
+            },
+            timeout=600.0,
         )
 
-        pcm = bytearray()
-        last_chunk_at = time.time()
+        # Pro songs can take a while; poll until the interaction settles.
+        deadline = time.time() + 600.0
+        while (
+            getattr(interaction, "status", None) in ("in_progress", "requires_action")
+            and time.time() < deadline
+        ):
+            await asyncio.sleep(5)
+            interaction = await client.aio.interactions.get(interaction.id)
 
-        async with client.aio.live.music.connect(model="models/lyria-realtime-exp") as session:
-            await session.set_weighted_prompts(
-                prompts=[types.WeightedPrompt(text=prompt_text, weight=1.0)]
-            )
+        status = getattr(interaction, "status", None)
+        if status != "completed":
+            raise Exception(f"Lyria 3 interaction did not complete (status={status})")
 
-            config_kwargs: dict[str, object] = {}
-            if bpm is not None:
-                config_kwargs["bpm"] = int(bpm)
-            if guidance is not None:
-                config_kwargs["guidance"] = float(guidance)
-            if density is not None:
-                config_kwargs["density"] = float(density)
-            if brightness is not None:
-                config_kwargs["brightness"] = float(brightness)
-            if temperature is not None:
-                config_kwargs["temperature"] = float(temperature)
-            if top_k is not None:
-                config_kwargs["top_k"] = int(top_k)
-            if seed is not None:
-                config_kwargs["seed"] = int(seed)
+        # 3. Extract inline audio + generated lyrics
+        audio = _extract_audio_content(interaction)
+        if audio is None or not getattr(audio, "data", None):
+            raise Exception("No audio returned by Lyria 3")
 
-            if isinstance(scale, str) and scale.strip():
-                scale_key = scale.strip()
-                scale_value = getattr(types.Scale, scale_key, None)
-                if scale_value is not None:
-                    config_kwargs["scale"] = scale_value
+        audio_bytes = base64.b64decode(audio.data)
+        mime_type = getattr(audio, "mime_type", None) or "audio/wav"
+        file_ext = _AUDIO_EXT_BY_MIME.get(mime_type, "wav")
+        generated_lyrics = getattr(interaction, "output_text", None)
 
-            if isinstance(music_generation_mode, str) and music_generation_mode.strip():
-                mode_key = music_generation_mode.strip()
-                mode_value = getattr(types.MusicGenerationMode, mode_key, None)
-                if mode_value is not None:
-                    config_kwargs["music_generation_mode"] = mode_value
+        if len(audio_bytes) < 1024:
+            raise Exception("Lyria 3 returned an empty audio payload")
 
-            if mute_bass is not None:
-                config_kwargs["mute_bass"] = bool(mute_bass)
-            if mute_drums is not None:
-                config_kwargs["mute_drums"] = bool(mute_drums)
-            if only_bass_and_drums is not None:
-                config_kwargs["only_bass_and_drums"] = bool(only_bass_and_drums)
-
-            if not config_kwargs:
-                config_kwargs["temperature"] = 1.1
-
-            await session.set_music_generation_config(
-                config=types.LiveMusicGenerationConfig(**config_kwargs)
-            )
-            await session.play()
-
-            # Safety margin: allow a bit more time than duration_seconds to collect enough bytes.
-            deadline = time.time() + float(duration_seconds) + 20.0
-
-            async for message in session.receive():
-                if time.time() > deadline:
-                    break
-
-                server_content = getattr(message, "server_content", None)
-                audio_chunks = getattr(server_content, "audio_chunks", None) if server_content is not None else None
-                if not audio_chunks:
-                    continue
-
-                for chunk in audio_chunks:
-                    data = getattr(chunk, "data", None)
-                    if isinstance(data, (bytes, bytearray)):
-                        pcm.extend(data)
-                        last_chunk_at = time.time()
-                    elif isinstance(data, str):
-                        # Defensive: some SDK shapes might surface base64 as str
-                        try:
-                            import base64 as _b64
-                            pcm.extend(_b64.b64decode(data))
-                            last_chunk_at = time.time()
-                        except Exception:
-                            pass
-
-                    if len(pcm) >= target_bytes:
-                        break
-
-                if len(pcm) >= target_bytes:
-                    break
-
-                # If we haven't received any audio for a while, stop early.
-                if (time.time() - last_chunk_at) > 10.0:
-                    break
-
-            try:
-                await session.stop()
-            except Exception:
-                pass
-
-        if len(pcm) < bytes_per_second:
-            raise Exception("No audio received from Lyria RealTime session")
-
-        # 3. Wrap raw PCM into WAV for browser playback
-        wav_header = create_wav_header(bytes(pcm), sample_rate=sample_rate, channels=channels, bits_per_sample=bits_per_sample)
-        container_data = wav_header + bytes(pcm)
-        content_type = "audio/wav"
-        file_ext = "wav"
+        duration_seconds = wav_duration_seconds(audio_bytes) if file_ext == "wav" else 0
 
         # 4. Upload to Supabase Storage
         file_path = f"generated/{user_id}/{track_id}.{file_ext}"
-        
-        # Upload using our simple client
-        await supabase_client.upload_file("audio", file_path, container_data, content_type)
-        
-        # 5. Get Public URL
+        await supabase_client.upload_file("audio", file_path, audio_bytes, mime_type)
+
+        # 5. Public URL
         public_url = f"{SUPABASE_URL}/storage/v1/object/public/audio/{file_path}"
-        
-        # 6. Update DB with completion
-        await supabase_client.update_track_status(track_id, {
+
+        # 6. Mark completed
+        updates = {
             "status": "completed",
             "audio_url": public_url,
-            "duration": duration_seconds
-        })
-        
+            "duration": duration_seconds,
+        }
+        if generated_lyrics and generated_lyrics.strip():
+            updates["lyrics"] = generated_lyrics.strip()
+        await supabase_client.update_track_status(track_id, updates)
+
         print(f"[Task] Successfully completed track {track_id}")
 
     except Exception as e:
-        error_msg = str(e)
         print(f"[Error] Failed processing track {track_id}: {traceback.format_exc()}")
-        
-        # Cleanup if track exists
+
+        # Cleanup + best-effort refund (credits are deducted before the task starts)
         if supabase_client:
             try:
                 await supabase_client.update_track_status(track_id, {"status": "failed"})
-                # Best-effort refund (credits are deducted before starting the background task)
                 profile = await supabase_client.get_profile(user_id)
                 if profile and isinstance(profile.get('credits'), (int, float)):
                     await supabase_client.update_credits(user_id, int(profile['credits']) + 10)
-            except:
+            except Exception:
                 pass
+
 
 @app.post("/generate-music")
 async def generate_music_endpoint(request: GenerateRequest, background_tasks: BackgroundTasks):
-    if not GOOGLE_AI_API_KEY:
-        raise HTTPException(status_code=500, detail="Server misconfigured: Missing API Key")
-    
-    if not supabase_client:
-        raise HTTPException(status_code=500, detail="Server misconfigured: Supabase unavailable")
-
-    # Preflight: ensure Lyria is available for this API key before charging credits.
-    lyria_ok, lyria_reason = await is_lyria_available()
-    if not lyria_ok:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Google Lyria RealTime (models/lyria-realtime-exp) недоступна для цього API ключа/проєкту. "
-                "Будь ласка, використайте ключ/проєкт з доступом до Lyria RealTime або інший провайдер генерації музики. "
-                f"({lyria_reason})"
-            ),
-        )
+    ready, reason = is_service_ready()
+    if not ready:
+        raise HTTPException(status_code=500, detail=f"Server misconfigured: {reason}")
 
     # 1. Check Credits
     try:
         profile = await supabase_client.get_profile(request.user_id)
         if not profile or profile['credits'] < 10:
-             raise HTTPException(status_code=402, detail="Insufficient credits")
-        
+            raise HTTPException(status_code=402, detail="Insufficient credits")
+
         current_credits = profile['credits']
     except HTTPException:
         raise
@@ -443,7 +340,6 @@ async def generate_music_endpoint(request: GenerateRequest, background_tasks: Ba
         raise HTTPException(status_code=500, detail="Failed to deduct credits")
 
     # 3. Create Pending Track
-    import uuid
     track_id = str(uuid.uuid4())
     try:
         track_data = {
@@ -456,31 +352,23 @@ async def generate_music_endpoint(request: GenerateRequest, background_tasks: Ba
             "is_public": False,
             "duration": 0
         }
+        if request.lyrics and request.lyrics.strip():
+            track_data["lyrics"] = request.lyrics.strip()
         await supabase_client.create_track(track_data)
     except Exception as e:
         print(f"Error creating track: {e}")
         # Attempt refund
         await supabase_client.update_credits(request.user_id, current_credits)
         raise HTTPException(status_code=500, detail="Failed to create track record")
-        
+
     background_tasks.add_task(
         generate_music_task,
         track_id,
         request.prompt,
         request.genre,
         request.user_id,
-        bpm=request.bpm,
-        guidance=request.guidance,
-        density=request.density,
-        brightness=request.brightness,
-        temperature=request.temperature,
-        top_k=request.top_k,
-        seed=request.seed,
-        scale=request.scale,
-        music_generation_mode=request.music_generation_mode,
-        mute_bass=request.mute_bass,
-        mute_drums=request.mute_drums,
-        only_bass_and_drums=request.only_bass_and_drums,
+        lyrics=request.lyrics,
+        negative_prompt=request.negative_prompt,
     )
     return {"status": "accepted", "message": "Generation started", "track": track_data, "credits_remaining": current_credits - 10}
 
