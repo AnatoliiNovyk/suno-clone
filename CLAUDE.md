@@ -1,0 +1,138 @@
+# CLAUDE.md
+
+Guidance for AI assistants (Claude Code and others) working in this repository.
+
+## Working Agreement (READ FIRST)
+
+These project-specific rules override default behavior and are enforced by the repo owner:
+
+1. **Respond in Ukrainian.** All chat replies to the user must be in Ukrainian (Відповіді надавай виключно українською мовою). Code, identifiers, and commit messages stay in English.
+2. **Do not change project files without approval.** The **only** exception is files inside `changelogs/`. For any other edit, propose the change and wait for the user to confirm before writing.
+3. **Write a changelog after every change.** After each edit/fix, add a new file to `changelogs/` named `changelog_YYYY-MM-DD_short-description.md` (date of the change; description in latin letters with hyphens instead of spaces). The entry must describe **how it was before** the change and **what improvement** the change delivers.
+
+> Note: `.github/copilot-instructions.md` contains an older version of these rules plus some now-stale technical claims (e.g. that generation is a "mock" in the edge function). Treat *this* file as the source of truth for architecture; treat the three rules above as binding conventions.
+
+## What This Project Is
+
+A full-stack clone of Suno's AI music-generation experience:
+
+- **`suno-clone/`** — React 18 + TypeScript + Vite SPA (the user-facing app).
+- **`python-service/`** — FastAPI service that performs the **actual** music generation via Google Lyria RealTime. This is the live generation backend today.
+- **`supabase/`** — Postgres schema (`tables/`), one RLS migration (`migrations/`), Storage, and Deno **edge functions** (`functions/`). Auth, DB, and Storage are used in production; the `generate-music` edge function is now **legacy** (superseded by `python-service`).
+- **`docs/`** — design system, tokens, and Suno UX analysis. **`imgs/`** — design/marketing assets. **`memories/`** — long-form progress log. **`changelogs/`** — per-change log (see rule 3).
+
+**Stack:** React 18, TypeScript, Vite 6, Tailwind CSS 3 + Radix UI, React Router 6, React Hook Form + Zod, `@supabase/supabase-js` | Supabase (Auth, Postgres, Storage, Deno Edge Functions) | FastAPI + `google-genai` (Lyria RealTime) | Stripe.
+
+## Architecture & Data Flow
+
+### Current music-generation flow (Lyria via Python service)
+
+Both the simple flow (`CreatePage.tsx`) and the advanced flow (`AdvancedPage.tsx`) call the **local Python service directly**, not the Supabase edge function:
+
+1. Frontend `POST http://localhost:8000/generate-music` with `{ prompt, genre, user_id, ...advanced controls }` (see `GenerateRequest` in `python-service/main.py`).
+2. Service preflight-checks that `models/lyria-realtime-exp` is available for the API key (cached 10 min), then checks the user's `profiles.credits >= 10` and **deducts 10 credits** via Supabase REST.
+3. It inserts a `tracks` row with `status: 'pending'`, returns `202 accepted`, and runs generation in a FastAPI `BackgroundTask`.
+4. The background task opens a Lyria RealTime WebSocket session (`client.aio.live.music.connect`), streams ~30s of PCM, wraps it in a WAV header, uploads to Supabase Storage bucket `audio` at `generated/{user_id}/{track_id}.wav`, and updates the track to `status: 'completed'` with the public `audio_url`.
+5. On failure it sets `status: 'failed'` and **refunds** the 10 credits (best-effort).
+6. Frontend calls `refreshUser()` to re-read credits, and the track surfaces in the Library.
+
+The service talks to Supabase through `SimpleSupabaseClient` (raw `httpx` REST calls with the service-role key) to avoid the heavy `supabase` Python dependency.
+
+> The commented-out `supabase.functions.invoke('generate-music', ...)` calls in `CreatePage.tsx` are the previous path, kept for reference. The `localhost:8000` URL is hardcoded for local dev.
+
+### Frontend
+
+- `src/App.tsx` — `<BrowserRouter>` → `<AuthProvider>` → `Header` / routed `main` / `Footer`. Routes: `/`, `/create`, `/advanced`, `/library`, `/pricing`, `/payment`, `/hub`, `/profile`, `/login`, `/signup`.
+- **Auth** — `src/contexts/AuthContext.tsx` exposes `useAuth()` with `{ user, loading, signIn, signUp, signOut, refreshUser }`. `user` includes `credits` and `plan`. Gate protected actions on `user`; call `refreshUser()` after anything that changes credits.
+- **Supabase client** — singleton in `src/lib/supabase.ts`, initialized from `import.meta.env.VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` (throws if missing). Import `{ supabase }`; never re-create the client.
+- **Shared types** — `src/types/index.ts`: `User`, `Track` (`status: 'pending' | 'processing' | 'completed' | 'failed'`), `Subscription`, `PricingPlan`.
+- **Structure** — `pages/` (route views), `components/{layout,audio,ui}/`, `hooks/`, `lib/`, `contexts/`, `types/`. Path alias `@` → `src/` (see `vite.config.ts` / `tsconfig`).
+
+### Backend (Supabase)
+
+- **Tables** (`supabase/tables/*.sql`): `profiles` (credits, plan), `tracks`, `credit_transactions`, `subscriptions`, `suno_plans`, `suno_subscriptions`. RLS enabled via `supabase/migrations/1765294229_enable_rls_policies.sql`.
+- **Storage**: public `audio` bucket. Demo assets at `samples/demo-{1..5}.mp3`; generated audio at `generated/{userId}/{trackId}.wav`.
+- **Edge functions** (Deno, `supabase/functions/`): `create-subscription` (Stripe Checkout session), `stripe-webhook` (syncs subscription state), `create-admin-user`, `create-bucket-audio-temp`, and the legacy `generate-music`.
+
+### Stripe subscription flow
+
+`PricingPage.tsx` → `/payment?plan=<id>` → `PaymentPage.tsx` invokes `create-subscription` edge function → redirect to Stripe Checkout → `stripe-webhook` updates the `subscriptions` table. Requires `STRIPE_SECRET_KEY` (and webhook secret) to be active.
+
+## Development Workflows
+
+### Frontend (`suno-clone/`) — uses pnpm
+
+```bash
+cd suno-clone
+pnpm install
+pnpm dev        # Vite dev server on http://localhost:5173
+pnpm lint       # ESLint (flat config, eslint.config.js)
+pnpm build      # tsc -b + vite build → dist/  (build:prod for prod mode)
+pnpm preview    # serve the production build
+```
+
+Note: the npm scripts run `pnpm install --prefer-offline` before each command by design.
+
+### Python service (`python-service/`)
+
+```bash
+cd python-service
+pip install -r requirements.txt        # fastapi, uvicorn, google-genai, python-dotenv, httpx
+python main.py                         # uvicorn on 0.0.0.0:8000  (GET / is a health check)
+python refill_credits.py               # interactive helper to top up a user's credits by email
+```
+
+Reads env from the **repo-root `.env`** (`load_dotenv("../.env")`): needs `GOOGLE_AI_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`.
+
+### Supabase edge functions (optional)
+
+```bash
+supabase functions serve create-subscription --env-file ../.env
+supabase functions deploy create-subscription
+supabase db push        # apply tables/ + migrations/
+```
+
+### Environment variables
+
+- **Frontend** — `suno-clone/.env`: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`.
+- **Python service & edge functions** — root `.env`: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `GOOGLE_AI_API_KEY`, `STRIPE_SECRET_KEY`.
+- All `.env*` files are git-ignored — **never commit secrets.**
+
+## Conventions
+
+- **Styling** — Tailwind with a dark-first design system in `tailwind.config.js`. Background `#0A0A0A` (`neutral-900`), primary/accent orange `#FF5722` (`primary` / `ring` / `accent`). Fonts: `font-display` (Reckless Neue serif), `font-body` (Inter), `font-mono`. Custom tokens include `shadow-glow-orange`, `animate-pulse-glow`, `animate-shimmer`. `darkMode: 'class'`.
+- **UI components** — prefer the already-installed Radix primitives (`@radix-ui/*`) and `class-variance-authority` + `clsx` + `tailwind-merge` (`cn()` in `src/lib/utils.ts`). `components.json` configures the shadcn-style setup.
+- **Single-row queries** — use `.maybeSingle()`.
+- **Loading states** — boolean state + spinning Lucide icon (`<Loader2 className="animate-spin" />`).
+- **Credits** — 10 credits per generation; 50 on signup. Plans: `free` / `pro` / `premier`.
+- **TypeScript** — keep shared shapes in `src/types/index.ts`; use the `@/` import alias.
+
+## Known Gaps / Caveats
+
+- **`localhost:8000` is hardcoded** in `CreatePage.tsx` and `AdvancedPage.tsx` — the Python service must be running locally for generation to work; there is no deployed generation URL wired in.
+- **Lyria RealTime access** — the Python service returns HTTP 503 (message in Ukrainian) if `models/lyria-realtime-exp` isn't available for the configured `GOOGLE_AI_API_KEY`.
+- **Stripe** — inactive until `STRIPE_SECRET_KEY`/webhook secret are set.
+- **No automated tests** — no test runner is configured; verify changes manually via the dev server and the Python service.
+- **RLS** — policies are enabled but not exhaustively tested for multi-tenant isolation.
+
+## Repository Map
+
+```
+.
+├── CLAUDE.md                 # This file
+├── README.md                 # Human-facing project overview
+├── .github/copilot-instructions.md   # Older AI instructions (see note above)
+├── changelogs/               # One markdown file per change (required — see rule 3)
+├── memories/                 # Long-form progress log (Ukrainian)
+├── docs/                     # Design system, tokens, Suno UX analysis
+├── imgs/                     # Design & marketing assets
+├── python-service/           # FastAPI Lyria generation backend (current)
+│   ├── main.py               # /generate-music endpoint + background task
+│   └── refill_credits.py     # credit top-up helper
+├── suno-clone/               # React + Vite frontend
+│   └── src/{pages,components,contexts,hooks,lib,types}/
+└── supabase/
+    ├── tables/               # SQL table definitions
+    ├── migrations/           # RLS policies
+    └── functions/            # Deno edge functions (Stripe live; generate-music legacy)
+```
