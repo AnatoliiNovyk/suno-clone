@@ -1,30 +1,56 @@
-import React, { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { Lock, Check, ArrowLeft, Loader2, ExternalLink } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../lib/supabase';
+import {
+  fetchPlanPrices,
+  findPrice,
+  formatMoney,
+  PROVIDER_LABEL,
+  PROVIDERS_FOR_CURRENCY,
+} from '../lib/pricing';
+import type { BillingInterval, Currency, PaymentProviderKey, PlanPrice } from '../types';
 
-const planDetails = {
-  pro: { name: 'Pro', price: 8, credits: 2500 },
-  premier: { name: 'Premier', price: 24, credits: 10000 }
+const planDetails: Record<string, { name: string; credits: number }> = {
+  pro: { name: 'Pro', credits: 2500 },
+  premier: { name: 'Premier', credits: 10000 },
 };
 
 export function PaymentPage() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const { user } = useAuth();
-  
-  const planId = searchParams.get('plan') as 'pro' | 'premier';
-  const interval = searchParams.get('interval') || 'month';
-  
+
+  const planId = searchParams.get('plan') ?? '';
+  const interval: BillingInterval = searchParams.get('interval') === 'year' ? 'year' : 'month';
+  const currencyParam = (searchParams.get('currency') ?? 'UAH').toUpperCase();
+  const currency: Currency = ['UAH', 'USD', 'EUR'].includes(currencyParam)
+    ? (currencyParam as Currency)
+    : 'UAH';
+
+  const availableProviders = PROVIDERS_FOR_CURRENCY[currency];
+  const [provider, setProvider] = useState<PaymentProviderKey>(availableProviders[0]);
+  const [prices, setPrices] = useState<PlanPrice[]>([]);
   const [processing, setProcessing] = useState(false);
   const [error, setError] = useState('');
 
   const plan = planDetails[planId];
-  const price = interval === 'year' ? Math.round(plan?.price * 0.8 * 12) : plan?.price;
+  const priceRow = findPrice(prices, planId, currency, interval);
 
   useEffect(() => {
-    // Handle return from Stripe
+    fetchPlanPrices().then(setPrices);
+  }, []);
+
+  useEffect(() => {
+    // Currency comes from the URL; keep the selected provider valid for it.
+    if (!availableProviders.includes(provider)) {
+      setProvider(availableProviders[0]);
+    }
+  }, [availableProviders, provider]);
+
+  useEffect(() => {
+    // Handle return from the payment gateway
     const status = searchParams.get('subscription');
     if (status === 'success') {
       navigate('/profile?success=true');
@@ -49,7 +75,7 @@ export function PaymentPage() {
     );
   }
 
-  const handleStripeCheckout = async () => {
+  const handleCheckout = async () => {
     if (!user) {
       navigate('/login');
       return;
@@ -59,10 +85,14 @@ export function PaymentPage() {
     setError('');
 
     try {
-      const { data, error: fnError } = await supabase.functions.invoke('create-subscription', {
+      const { data, error: fnError } = await supabase.functions.invoke('create-payment', {
         body: {
-          planType: planId,
-          customerEmail: user.email
+          provider,
+          planKey: planId,
+          currency,
+          interval,
+          customerEmail: user.email,
+          userId: user.id,
         }
       });
 
@@ -98,7 +128,7 @@ export function PaymentPage() {
         <div className="bg-neutral-700/50 rounded-2xl border border-white/10 p-8">
           {/* Order Summary */}
           <h2 className="text-2xl font-bold text-neutral-50 mb-6">Підтвердження замовлення</h2>
-          
+
           <div className="space-y-4 mb-8">
             <div className="flex justify-between py-3 border-b border-white/10">
               <span className="text-neutral-100">План</span>
@@ -112,6 +142,10 @@ export function PaymentPage() {
               <span className="text-neutral-100">Період</span>
               <span className="text-neutral-50">{interval === 'year' ? 'Щорічно' : 'Щомісяця'}</span>
             </div>
+            <div className="flex justify-between py-3 border-b border-white/10">
+              <span className="text-neutral-100">Валюта</span>
+              <span className="text-neutral-50">{currency}</span>
+            </div>
             {interval === 'year' && (
               <div className="flex justify-between py-3 border-b border-white/10 text-success">
                 <span>Знижка</span>
@@ -121,8 +155,29 @@ export function PaymentPage() {
             <div className="flex justify-between py-4">
               <span className="text-xl text-neutral-50 font-bold">Разом</span>
               <span className="text-xl text-neutral-50 font-bold">
-                ${price}{interval === 'year' ? '/рік' : '/місяць'}
+                {priceRow ? formatMoney(priceRow.amount_minor, currency) : '—'}
+                {interval === 'year' ? '/рік' : '/місяць'}
               </span>
+            </div>
+          </div>
+
+          {/* Payment method */}
+          <div className="mb-8">
+            <h3 className="text-sm font-semibold text-neutral-50 mb-3">Спосіб оплати:</h3>
+            <div className="flex flex-wrap gap-3">
+              {availableProviders.map((p) => (
+                <button
+                  key={p}
+                  onClick={() => setProvider(p)}
+                  className={`px-4 py-2 rounded-full text-sm font-medium ${
+                    provider === p
+                      ? 'bg-primary-500 text-white'
+                      : 'bg-neutral-700 text-neutral-100 border border-white/10 hover:border-white/20'
+                  }`}
+                >
+                  {PROVIDER_LABEL[p]}
+                </button>
+              ))}
             </div>
           </div>
 
@@ -153,27 +208,27 @@ export function PaymentPage() {
 
           {/* Checkout Button */}
           <button
-            onClick={handleStripeCheckout}
+            onClick={handleCheckout}
             disabled={processing}
             className="w-full flex items-center justify-center gap-2 py-4 rounded-full bg-gradient-to-r from-[#FF6B35] via-primary-500 to-primary-700 text-white font-semibold text-lg shadow-glow-orange hover:brightness-110 disabled:opacity-50 transition-all"
           >
             {processing ? (
               <>
                 <Loader2 className="w-5 h-5 animate-spin" />
-                Перенаправлення до Stripe...
+                Перенаправлення до оплати...
               </>
             ) : (
               <>
                 <Lock className="w-5 h-5" />
-                Оплатити через Stripe
+                Оплатити через {PROVIDER_LABEL[provider]}
                 <ExternalLink className="w-4 h-4 ml-1" />
               </>
             )}
           </button>
 
           <p className="mt-4 text-xs text-neutral-300 text-center">
-            Ви будете перенаправлені на захищену сторінку Stripe для завершення оплати.
-            Підтримуються Visa, Mastercard, American Express, Apple Pay, Google Pay.
+            Ви будете перенаправлені на захищену сторінку платіжної системи для завершення оплати.
+            Підтримуються Visa, Mastercard, Apple Pay, Google Pay.
           </p>
 
           {/* Security badges */}

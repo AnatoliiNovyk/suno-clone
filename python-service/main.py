@@ -40,6 +40,10 @@ app.add_middleware(
     allow_headers=["*"],  # Allows all headers
 )
 
+class InsufficientCreditsError(Exception):
+    """Raised when an atomic credit deduction would make the balance negative."""
+
+
 # Simple Supabase Client using HTTPX to avoid dependency on 'supabase' package which requires compilation tools on some systems
 class SimpleSupabaseClient:
     def __init__(self, url, key):
@@ -71,25 +75,22 @@ class SimpleSupabaseClient:
             resp.raise_for_status()
             return resp.json()[0]
 
-    async def get_profile(self, user_id):
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                f"{self.url}/rest/v1/profiles?id=eq.{user_id}&select=credits",
-                headers=self.headers
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            return data[0] if data else None
+    async def adjust_credits(self, user_id, delta):
+        """Atomically adjust the user's credits via the adjust_credits RPC.
 
-    async def update_credits(self, user_id, new_credits):
+        Returns the new balance. Raises InsufficientCreditsError when the
+        adjustment would drive the balance below zero.
+        """
         async with httpx.AsyncClient() as client:
-            resp = await client.patch(
-                f"{self.url}/rest/v1/profiles?id=eq.{user_id}",
+            resp = await client.post(
+                f"{self.url}/rest/v1/rpc/adjust_credits",
                 headers=self.headers,
-                json={"credits": new_credits}
+                json={"p_user_id": user_id, "p_delta": delta},
             )
+            if resp.status_code == 400 and "insufficient_credits" in resp.text:
+                raise InsufficientCreditsError()
             resp.raise_for_status()
-            return resp
+            return resp.json()
 
     async def upload_file(self, bucket, path, file_data, content_type="audio/mpeg"):
         upload_headers = {
@@ -302,15 +303,17 @@ async def generate_music_task(
     except Exception as e:
         print(f"[Error] Failed processing track {track_id}: {traceback.format_exc()}")
 
-        # Cleanup + best-effort refund (credits are deducted before the task starts)
+        # Cleanup + refund (credits are deducted before the task starts).
+        # A failed refund is a real money bug — log it loudly, never swallow it.
         if supabase_client:
             try:
                 await supabase_client.update_track_status(track_id, {"status": "failed"})
-                profile = await supabase_client.get_profile(user_id)
-                if profile and isinstance(profile.get('credits'), (int, float)):
-                    await supabase_client.update_credits(user_id, int(profile['credits']) + 10)
             except Exception:
-                pass
+                print(f"[Error] Failed to mark track {track_id} as failed: {traceback.format_exc()}")
+            try:
+                await supabase_client.adjust_credits(user_id, 10)
+            except Exception:
+                print(f"[CRITICAL] Refund of 10 credits FAILED for user {user_id} (track {track_id}): {traceback.format_exc()}")
 
 
 @app.post("/generate-music")
@@ -319,22 +322,11 @@ async def generate_music_endpoint(request: GenerateRequest, background_tasks: Ba
     if not ready:
         raise HTTPException(status_code=500, detail=f"Server misconfigured: {reason}")
 
-    # 1. Check Credits
+    # 1-2. Atomically deduct 10 credits (single RPC, no read-modify-write race).
     try:
-        profile = await supabase_client.get_profile(request.user_id)
-        if not profile or profile['credits'] < 10:
-            raise HTTPException(status_code=402, detail="Insufficient credits")
-
-        current_credits = profile['credits']
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Error checking credits: {e}")
-        raise HTTPException(status_code=500, detail="Failed to check credits")
-
-    # 2. Deduct Credits
-    try:
-        await supabase_client.update_credits(request.user_id, current_credits - 10)
+        credits_remaining = await supabase_client.adjust_credits(request.user_id, -10)
+    except InsufficientCreditsError:
+        raise HTTPException(status_code=402, detail="Insufficient credits")
     except Exception as e:
         print(f"Error deducting credits: {e}")
         raise HTTPException(status_code=500, detail="Failed to deduct credits")
@@ -357,8 +349,10 @@ async def generate_music_endpoint(request: GenerateRequest, background_tasks: Ba
         await supabase_client.create_track(track_data)
     except Exception as e:
         print(f"Error creating track: {e}")
-        # Attempt refund
-        await supabase_client.update_credits(request.user_id, current_credits)
+        try:
+            await supabase_client.adjust_credits(request.user_id, 10)
+        except Exception:
+            print(f"[CRITICAL] Refund failed for user {request.user_id} after track-create error: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail="Failed to create track record")
 
     background_tasks.add_task(
@@ -370,7 +364,7 @@ async def generate_music_endpoint(request: GenerateRequest, background_tasks: Ba
         lyrics=request.lyrics,
         negative_prompt=request.negative_prompt,
     )
-    return {"status": "accepted", "message": "Generation started", "track": track_data, "credits_remaining": current_credits - 10}
+    return {"status": "accepted", "message": "Generation started", "track": track_data, "credits_remaining": credits_remaining}
 
 @app.get("/")
 def health_check():

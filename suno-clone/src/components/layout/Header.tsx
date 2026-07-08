@@ -13,6 +13,7 @@ export function Header() {
     { path: '/advanced', label: 'Розширений' },
     { path: '/library', label: 'Бібліотека' },
     { path: '/hub', label: 'Hub' },
+    { path: '/merchant', label: 'Мерчантам' },
   ];
 
   const isActive = (path: string) => location.pathname === path;

@@ -1,3 +1,7 @@
+# Python
+__pycache__/
+*.pyc
+
 # Node / pnpm
 node_modules/
 **/node_modules/
