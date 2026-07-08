@@ -50,13 +50,21 @@ The service talks to Supabase through `SimpleSupabaseClient` (raw `httpx` REST c
 
 ### Backend (Supabase)
 
-- **Tables** (`supabase/tables/*.sql`): `profiles` (credits, plan), `tracks`, `credit_transactions`, `subscriptions`, `suno_plans`, `suno_subscriptions`. RLS enabled via `supabase/migrations/1765294229_enable_rls_policies.sql`.
+- **Tables** (`supabase/tables/*.sql`): `profiles` (credits, plan, role), `tracks`, `credit_transactions`, `subscriptions` (provider-agnostic: `provider`, `currency`, `amount_minor`, `provider_*_id`), `plans` + `plan_prices` (single source of truth for plan credits and fixed per-currency prices in minor units), `merchants` + `merchant_documents` + `merchant_provider_accounts` (merchant onboarding), plus legacy `suno_plans`/`suno_subscriptions` (vestigial). RLS via `supabase/migrations/1765294229_enable_rls_policies.sql` and `1783468800_payments_multi_provider_and_merchants.sql`. Atomic credit moves go through the `adjust_credits(p_user_id, p_delta)` RPC (service-role only) — never read-modify-write `profiles.credits`.
 - **Storage**: public `audio` bucket. Demo assets at `samples/demo-{1..5}.mp3`; generated audio at `generated/{userId}/{trackId}.{ext}` (extension from Lyria 3's returned `mime_type`, e.g. `.wav`).
-- **Edge functions** (Deno, `supabase/functions/`): `create-subscription` (Stripe Checkout session), `stripe-webhook` (syncs subscription state), `create-admin-user`, `create-bucket-audio-temp`, and the legacy `generate-music`.
+- **Edge functions** (Deno, `supabase/functions/`): `create-payment` (provider-agnostic checkout), `payments-webhook` (signature-verified webhook for all providers), `create-admin-user`, `create-bucket-audio-temp`, plus legacy `create-subscription`/`stripe-webhook` (superseded) and `generate-music`.
 
-### Stripe subscription flow
+### Payments (multi-provider, multi-currency)
 
-`PricingPage.tsx` → `/payment?plan=<id>` → `PaymentPage.tsx` invokes `create-subscription` edge function → redirect to Stripe Checkout → `stripe-webhook` updates the `subscriptions` table. Requires `STRIPE_SECRET_KEY` (and webhook secret) to be active.
+Provider abstraction lives in `supabase/functions/_shared/payments/`: `provider.ts` (the `PaymentProvider` interface + crypto helpers), `stripe.ts` (USD/EUR, real HMAC webhook verification), `liqpay.ts` (UAH/USD/EUR, `base64(sha1(priv+data+priv))` signatures), `index.ts` (registry — adding a gateway = one file + one registry entry).
+
+Flow: `PricingPage.tsx` (currency selector UAH/USD/EUR + interval) → `/payment?plan=<id>&interval=<i>&currency=<c>` → `PaymentPage.tsx` (provider choice per currency: UAH → LiqPay; USD/EUR → Stripe or LiqPay) invokes `create-payment` with `{ provider, planKey, currency, interval, customerEmail, userId }` → server loads the fixed price from `plan_prices` (never trusts client amounts) → redirect to the gateway → `payments-webhook?provider=<key>` verifies the signature, sets `profiles.plan`/`credits` (credits read from `plans`), and inserts a generalized `subscriptions` row.
+
+Frontend money helpers are in `suno-clone/src/lib/pricing.ts` (`formatMoney`, `PROVIDERS_FOR_CURRENCY`, fallback price table mirroring the SQL seed). Requires `STRIPE_SECRET_KEY`/`STRIPE_WEBHOOK_SECRET` and/or `LIQPAY_PUBLIC_KEY`/`LIQPAY_PRIVATE_KEY`, plus `SITE_URL` for redirects.
+
+### Merchant onboarding (minimal KYC)
+
+`/merchant` (`MerchantRegisterPage.tsx`): name + email + country + **one document** is enough to submit. Documents upload to the private `merchant-docs` bucket (`{userId}/{merchantId}/...`, owner-scoped RLS); the application lands in `merchants` with `status: 'pending'`; review is done by admins (`profiles.role = 'admin'`, `is_admin()` helper). Gateway credentials are referenced via `merchant_provider_accounts.credentials_ref` — never stored as plaintext.
 
 ## Development Workflows
 
@@ -95,7 +103,7 @@ supabase db push        # apply tables/ + migrations/
 ### Environment variables
 
 - **Frontend** — `suno-clone/.env`: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`.
-- **Python service & edge functions** — root `.env`: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `GOOGLE_AI_API_KEY`, `STRIPE_SECRET_KEY`.
+- **Python service & edge functions** — root `.env`: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `GOOGLE_AI_API_KEY`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `LIQPAY_PUBLIC_KEY`, `LIQPAY_PRIVATE_KEY`, `SITE_URL` (frontend base URL for payment redirects).
 - All `.env*` files are git-ignored — **never commit secrets.**
 
 ## Conventions
@@ -111,7 +119,8 @@ supabase db push        # apply tables/ + migrations/
 
 - **`localhost:8000` is hardcoded** in `CreatePage.tsx` and `AdvancedPage.tsx` — the Python service must be running locally for generation to work; there is no deployed generation URL wired in.
 - **Lyria 3 access** — generation requires a `GOOGLE_AI_API_KEY` with access to `lyria-3-pro-preview`. There is no model-availability preflight: a key without access is charged 10 credits, generation fails, and the credits are refunded (best-effort).
-- **Stripe** — inactive until `STRIPE_SECRET_KEY`/webhook secret are set.
+- **Payments** — inactive until provider keys are set (`STRIPE_SECRET_KEY`+`STRIPE_WEBHOOK_SECRET` for Stripe, `LIQPAY_PUBLIC_KEY`+`LIQPAY_PRIVATE_KEY` for LiqPay) and `SITE_URL` is configured. The legacy `create-subscription`/`stripe-webhook` functions are superseded by `create-payment`/`payments-webhook` but still deployed-compatible.
+- **Merchant review** — applications land in `merchants` as `pending`; approval currently requires setting `status` via service role (no admin UI yet).
 - **No automated tests** — no test runner is configured; verify changes manually via the dev server and the Python service.
 - **RLS** — policies are enabled but not exhaustively tested for multi-tenant isolation.
 

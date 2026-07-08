@@ -25,15 +25,45 @@ export interface Track {
   created_at: string;
 }
 
+export type Currency = 'UAH' | 'USD' | 'EUR';
+export type BillingInterval = 'month' | 'year';
+export type PaymentProviderKey = 'stripe' | 'liqpay';
+
 export interface Subscription {
   id: string;
   user_id: string;
   plan: string;
+  provider?: PaymentProviderKey;
+  currency?: Currency;
+  amount_minor?: number;
+  interval?: BillingInterval;
+  provider_customer_id?: string;
+  provider_subscription_id?: string;
+  /** @deprecated legacy Stripe-only columns; use provider_* fields */
   stripe_customer_id?: string;
+  /** @deprecated legacy Stripe-only columns; use provider_* fields */
   stripe_subscription_id?: string;
   status: string;
   current_period_start?: string;
   current_period_end?: string;
+}
+
+export interface PlanPrice {
+  plan_key: string;
+  currency: Currency;
+  interval: BillingInterval;
+  amount_minor: number;
+}
+
+export interface Merchant {
+  id: string;
+  owner_user_id: string;
+  legal_name: string;
+  contact_email: string;
+  country: string;
+  status: 'pending' | 'approved' | 'rejected';
+  review_note?: string;
+  created_at: string;
 }
 
 export interface PricingPlan {

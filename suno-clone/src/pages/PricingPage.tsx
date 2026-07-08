@@ -1,16 +1,18 @@
-import React, { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Check, Sparkles, Zap, Crown } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { CURRENCIES, fetchPlanPrices, findPrice, formatMoney } from '../lib/pricing';
+import type { BillingInterval, Currency, PlanPrice } from '../types';
 
+// Marketing copy stays local; money comes from the plan_prices table.
 const plans = [
   {
     id: 'free',
     name: 'Free',
     icon: Sparkles,
-    price: 0,
     credits: 50,
-    interval: 'day' as const,
+    creditsInterval: 'день',
     features: [
       '50 кредитів на день',
       'Базова генерація музики',
@@ -22,9 +24,8 @@ const plans = [
     id: 'pro',
     name: 'Pro',
     icon: Zap,
-    price: 8,
     credits: 2500,
-    interval: 'month' as const,
+    creditsInterval: 'місяць',
     recommended: true,
     features: [
       '2500 кредитів на місяць',
@@ -39,9 +40,8 @@ const plans = [
     id: 'premier',
     name: 'Premier',
     icon: Crown,
-    price: 24,
     credits: 10000,
-    interval: 'month' as const,
+    creditsInterval: 'місяць',
     features: [
       '10000 кредитів на місяць',
       'Повний доступ до функцій',
@@ -58,13 +58,19 @@ const plans = [
 export function PricingPage() {
   const navigate = useNavigate();
   const { user } = useAuth();
-  const [billingInterval, setBillingInterval] = useState<'month' | 'year'>('month');
+  const [billingInterval, setBillingInterval] = useState<BillingInterval>('month');
+  const [currency, setCurrency] = useState<Currency>('UAH');
+  const [prices, setPrices] = useState<PlanPrice[]>([]);
+
+  useEffect(() => {
+    fetchPlanPrices().then(setPrices);
+  }, []);
 
   const handleSelectPlan = (planId: string) => {
     if (planId === 'free') {
       navigate('/signup');
     } else {
-      navigate(`/payment?plan=${planId}&interval=${billingInterval}`);
+      navigate(`/payment?plan=${planId}&interval=${billingInterval}&currency=${currency}`);
     }
   };
 
@@ -81,8 +87,8 @@ export function PricingPage() {
           </p>
         </div>
 
-        {/* Billing Toggle */}
-        <div className="flex items-center justify-center gap-4 mb-12">
+        {/* Billing + Currency Toggles */}
+        <div className="flex flex-wrap items-center justify-center gap-4 mb-6">
           <button
             onClick={() => setBillingInterval('month')}
             className={`px-4 py-2 rounded-full text-sm font-medium ${
@@ -108,13 +114,29 @@ export function PricingPage() {
           </button>
         </div>
 
+        <div className="flex items-center justify-center gap-2 mb-12">
+          <span className="text-sm text-neutral-300 mr-1">Валюта:</span>
+          {CURRENCIES.map((c) => (
+            <button
+              key={c}
+              onClick={() => setCurrency(c)}
+              className={`px-3 py-1.5 rounded-full text-sm font-medium ${
+                currency === c
+                  ? 'bg-primary-500 text-white'
+                  : 'bg-neutral-700 text-neutral-100 border border-white/10 hover:border-white/20'
+              }`}
+            >
+              {c}
+            </button>
+          ))}
+        </div>
+
         {/* Pricing Cards */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 lg:gap-8">
           {plans.map((plan) => {
             const Icon = plan.icon;
-            const price = billingInterval === 'year' && plan.price > 0
-              ? Math.round(plan.price * 0.8 * 12)
-              : plan.price;
+            const priceRow = findPrice(prices, plan.id, currency, billingInterval);
+            const isFree = plan.id === 'free';
             const isCurrentPlan = user?.plan === plan.id;
 
             return (
@@ -143,9 +165,9 @@ export function PricingPage() {
 
                 <div className="mb-6">
                   <span className="text-4xl font-bold text-neutral-50">
-                    ${price}
+                    {isFree ? formatMoney(0, currency) : priceRow ? formatMoney(priceRow.amount_minor, currency) : '—'}
                   </span>
-                  {plan.price > 0 && (
+                  {!isFree && (
                     <span className="text-neutral-100">
                       /{billingInterval === 'year' ? 'рік' : 'місяць'}
                     </span>
@@ -154,7 +176,7 @@ export function PricingPage() {
 
                 <div className="mb-6">
                   <span className="text-sm text-neutral-100">
-                    {plan.credits.toLocaleString()} кредитів / {plan.interval === 'day' ? 'день' : 'місяць'}
+                    {plan.credits.toLocaleString()} кредитів / {plan.creditsInterval}
                   </span>
                 </div>
 
@@ -178,7 +200,7 @@ export function PricingPage() {
                       : 'bg-neutral-700 text-neutral-50 border border-white/15 hover:bg-neutral-700/80'
                   }`}
                 >
-                  {isCurrentPlan ? 'Поточний план' : plan.price === 0 ? 'Почати безкоштовно' : 'Обрати план'}
+                  {isCurrentPlan ? 'Поточний план' : isFree ? 'Почати безкоштовно' : 'Обрати план'}
                 </button>
               </div>
             );
@@ -195,6 +217,10 @@ export function PricingPage() {
               {
                 q: 'Що таке кредити?',
                 a: 'Кредити - це внутрішня валюта для генерації музики. Одна генерація коштує 10 кредитів.'
+              },
+              {
+                q: 'В якій валюті я можу платити?',
+                a: 'Підтримуються гривня (₴), долар ($) та євро (€). Оплата в гривні проходить через LiqPay, у доларах та євро — через Stripe або LiqPay.'
               },
               {
                 q: 'Чи можу я використовувати музику комерційно?',
