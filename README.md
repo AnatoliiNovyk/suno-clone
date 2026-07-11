@@ -1,12 +1,12 @@
 # Suno Clone
 
-A full-stack clone of the Suno music-generation experience. The project pairs a React + Vite front-end with Supabase Auth, Database, Storage, Edge Functions, and Stripe-powered subscription flows. It is designed as a reference implementation for experimenting with AI-assisted music tools and premium subscription tiers.
+A full-stack clone of the Suno music-generation experience. The project pairs a React + Vite front-end with Supabase Auth, Database, Storage, a Python generation service, and Stripe-powered subscription flows. It is designed as a reference implementation for experimenting with AI-assisted music tools and premium subscription tiers.
 
 ## Features
 
 - 🎛️ **Multi-page React SPA** – Marketing, creation, library, and account views implemented with React Router and Tailwind CSS.
 - 🔐 **Supabase Auth & Profiles** – Email-based auth flow, credit tracking, and profile management stored in Supabase Postgres tables.
-- 🧠 **AI music generation workflow** – Edge function stub (`generate-music`) that validates auth, enforces credit usage, and simulates music generation responses.
+- 🧠 **AI music generation workflow** – Python service (`python-service/main.py`) validates Supabase auth, deducts credits atomically, creates a track record, and runs Google Lyria 3 generation in the background.
 - 💳 **Stripe subscription integration** – Supabase edge functions for creating checkout sessions and handling webhooks to keep subscriptions in sync.
 - ☁️ **Supabase Storage access** – Demo audio/cover assets served through public Supabase storage buckets.
 
@@ -28,6 +28,7 @@ A full-stack clone of the Suno music-generation experience. The project pairs a 
 ├── docs/                        # Research notes, UX plans, and design references
 ├── imgs/                        # Design inspiration & marketing assets
 ├── memories/                    # Project progress log
+├── python-service/              # FastAPI generation service for Google Lyria music
 ├── suno-clone/                  # Front-end Vite project
 │   ├── public/                  # Static assets served by Vite
 │   ├── src/                     # React application source
@@ -117,7 +118,7 @@ Never commit `.env`. See `.env.example` for the full list.
 
 | Function                 | Purpose |
 |--------------------------|---------|
-| `generate-music`         | Validates auth, checks credits, and simulates music generation responses, deducting credits@supabase/functions/generate-music/index.ts#20-140 |
+| `generate-music`         | Legacy compatibility path; current frontend uses `python-service/main.py` for generation and not this edge function |
 | `create-subscription`    | Creates Stripe checkout sessions for available plans@supabase/functions/create-subscription/index.ts#12-88 |
 | `stripe-webhook`         | (See `supabase/functions/stripe-webhook/index.ts`) Handles Stripe event callbacks to sync subscription state |
 | `create-admin-user`      | Utility for seeding an admin account |

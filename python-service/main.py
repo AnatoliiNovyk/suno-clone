@@ -162,15 +162,34 @@ async def require_user(
     return await verify_supabase_user(credentials.credentials)
 
 
+def get_config_issues() -> list[str]:
+    missing: list[str] = []
+    if not GOOGLE_AI_API_KEY:
+        missing.append("GOOGLE_AI_API_KEY")
+    if not SUPABASE_URL:
+        missing.append("SUPABASE_URL")
+    if not SUPABASE_SERVICE_ROLE_KEY:
+        missing.append("SUPABASE_SERVICE_ROLE_KEY")
+    if not SUPABASE_ANON_KEY:
+        missing.append("SUPABASE_ANON_KEY")
+    if not missing and not supabase_client:
+        missing.append("Supabase client unavailable")
+    return missing
+
+
 def is_service_ready() -> tuple[bool, str | None]:
     """Lightweight preflight before charging credits."""
-    if not GOOGLE_AI_API_KEY:
-        return False, "Missing GOOGLE_AI_API_KEY"
-    if not supabase_client:
-        return False, "Supabase unavailable"
-    if not SUPABASE_ANON_KEY:
-        return False, "Missing SUPABASE_ANON_KEY"
+    missing = get_config_issues()
+    if missing:
+        return False, ", ".join(missing)
     return True, None
+
+
+@app.on_event("startup")
+async def startup_validate_configuration():
+    ready, reason = is_service_ready()
+    if not ready:
+        raise RuntimeError(f"Server misconfigured: {reason}")
 
 
 _AUDIO_EXT_BY_MIME = {

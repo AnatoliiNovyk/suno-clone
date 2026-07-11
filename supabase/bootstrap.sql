@@ -202,6 +202,8 @@ END;
 $$;
 
 REVOKE ALL ON FUNCTION adjust_credits(UUID, INTEGER) FROM PUBLIC, anon, authenticated;
+-- The service role (Python service, webhooks) must still be able to call it.
+GRANT EXECUTE ON FUNCTION adjust_credits(UUID, INTEGER) TO service_role;
 
 -- ============================================================
 -- 3. ROW LEVEL SECURITY
@@ -216,14 +218,26 @@ ALTER TABLE plan_prices ENABLE ROW LEVEL SECURITY;
 ALTER TABLE merchants ENABLE ROW LEVEL SECURITY;
 ALTER TABLE merchant_documents ENABLE ROW LEVEL SECURITY;
 ALTER TABLE merchant_provider_accounts ENABLE ROW LEVEL SECURITY;
+-- Legacy tables: RLS on with no policies = service-role only (never anon).
+ALTER TABLE suno_plans ENABLE ROW LEVEL SECURITY;
+ALTER TABLE suno_subscriptions ENABLE ROW LEVEL SECURITY;
 
 -- Profiles
 DROP POLICY IF EXISTS "Users can view own profile" ON profiles;
 CREATE POLICY "Users can view own profile" ON profiles FOR SELECT USING (auth.uid() = id);
 DROP POLICY IF EXISTS "Users can update own profile" ON profiles;
-CREATE POLICY "Users can update own profile" ON profiles FOR UPDATE USING (auth.uid() = id);
+CREATE POLICY "Users can update own profile" ON profiles FOR UPDATE
+    USING (auth.uid() = id)
+    WITH CHECK (auth.uid() = id);
 DROP POLICY IF EXISTS "Users can insert own profile" ON profiles;
 CREATE POLICY "Users can insert own profile" ON profiles FOR INSERT WITH CHECK (auth.uid() = id);
+
+-- Lock privileged columns: role/credits/plan move only through the service
+-- role (adjust_credits, webhooks, admin SQL), never a client write.
+REVOKE UPDATE ON profiles FROM anon, authenticated;
+GRANT  UPDATE (display_name, avatar_url) ON profiles TO authenticated;
+REVOKE INSERT ON profiles FROM anon, authenticated;
+GRANT  INSERT (id, email, display_name, avatar_url) ON profiles TO authenticated;
 
 -- Tracks
 DROP POLICY IF EXISTS "Users can view own tracks" ON tracks;
@@ -258,10 +272,12 @@ CREATE POLICY "merchants_owner_insert" ON merchants FOR INSERT
     WITH CHECK (auth.uid() = owner_user_id);
 DROP POLICY IF EXISTS "merchants_owner_update" ON merchants;
 CREATE POLICY "merchants_owner_update" ON merchants FOR UPDATE
-    USING (auth.uid() = owner_user_id AND status = 'pending');
+    USING (auth.uid() = owner_user_id AND status = 'pending')
+    WITH CHECK (auth.uid() = owner_user_id AND status = 'pending');
 DROP POLICY IF EXISTS "merchants_admin_update" ON merchants;
 CREATE POLICY "merchants_admin_update" ON merchants FOR UPDATE
-    USING (is_admin());
+    USING (is_admin())
+    WITH CHECK (is_admin());
 
 -- Documents follow their merchant's ownership.
 DROP POLICY IF EXISTS "merchant_documents_owner_select" ON merchant_documents;
@@ -269,7 +285,7 @@ CREATE POLICY "merchant_documents_owner_select" ON merchant_documents FOR SELECT
     USING (EXISTS (SELECT 1 FROM merchants m WHERE m.id = merchant_id AND (m.owner_user_id = auth.uid() OR is_admin())));
 DROP POLICY IF EXISTS "merchant_documents_owner_insert" ON merchant_documents;
 CREATE POLICY "merchant_documents_owner_insert" ON merchant_documents FOR INSERT
-    WITH CHECK (EXISTS (SELECT 1 FROM merchants m WHERE m.id = merchant_id AND m.owner_user_id = auth.uid()));
+    WITH CHECK (status = 'submitted' AND EXISTS (SELECT 1 FROM merchants m WHERE m.id = merchant_id AND m.owner_user_id = auth.uid()));
 
 -- Provider accounts: owner sees own, admin manages.
 DROP POLICY IF EXISTS "merchant_provider_accounts_owner_select" ON merchant_provider_accounts;
@@ -292,6 +308,15 @@ ON CONFLICT (id) DO NOTHING;
 INSERT INTO storage.buckets (id, name, public)
 VALUES ('merchant-docs', 'merchant-docs', false)
 ON CONFLICT (id) DO NOTHING;
+
+-- Audio bucket: public READ only. Uploads/updates/deletes go through the
+-- service role (which bypasses RLS) — never grant public write.
+DROP POLICY IF EXISTS "Public Upload for audio" ON storage.objects;
+DROP POLICY IF EXISTS "Public Update for audio" ON storage.objects;
+DROP POLICY IF EXISTS "Public Delete for audio" ON storage.objects;
+DROP POLICY IF EXISTS "audio_public_read" ON storage.objects;
+CREATE POLICY "audio_public_read" ON storage.objects FOR SELECT
+    USING (bucket_id = 'audio');
 
 -- Files live under merchant-docs/{auth.uid()}/... — owner-scoped by first path segment.
 DROP POLICY IF EXISTS "merchant_docs_owner_insert" ON storage.objects;

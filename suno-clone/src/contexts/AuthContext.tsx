@@ -24,15 +24,15 @@ async function ensureProfile(userId: string, email: string): Promise<User | null
     return data as User;
   }
 
-  // Create profile if missing (works with RLS insert-own; trigger may also create it).
+  // Create profile if missing (works with RLS insert-own; trigger may also
+  // create it). credits/plan/role are set by DB defaults — never client-written
+  // (those columns are locked to the service role at the RLS layer).
   const { data: created, error: insertError } = await supabase
     .from('profiles')
     .upsert(
       {
         id: userId,
         email,
-        credits: 50,
-        plan: 'free',
       },
       { onConflict: 'id', ignoreDuplicates: true },
     )
