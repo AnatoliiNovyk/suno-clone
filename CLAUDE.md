@@ -97,6 +97,10 @@ supabase functions deploy create-subscription
 supabase db push        # apply tables/ + migrations/
 ```
 
+### Fresh Supabase project (bootstrap)
+
+If the Supabase project is gone or you're starting from scratch, **`supabase/bootstrap.sql`** recreates everything in one shot: paste it into Dashboard → SQL Editor and run. It is idempotent (safe to re-run) and creates all tables, `is_admin()`/`adjust_credits()` functions, RLS policies, the `audio` (public) and `merchant-docs` (private) storage buckets, and seeds `plans`/`plan_prices`. Afterwards: update both `.env` files with the new project's URL/keys and deploy the edge functions (`create-payment`, `payments-webhook`).
+
 ### Environment variables
 
 Prefer a **single root `.env`** (see `.env.example`). Vite loads it via `envDir: '..'` in `suno-clone/vite.config.ts`.
