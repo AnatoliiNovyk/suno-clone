@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Sparkles, Loader2, Music, ChevronDown, ChevronUp, Mic, Upload, Wand2 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { generateMusic } from '../lib/generateApi';
 
 const genres = [
   'Pop', 'Rock', 'Hip-Hop', 'Electronic', 'Jazz', 'Classical', 'Country', 'R&B',
@@ -74,35 +75,12 @@ export function AdvancedPage() {
       const finalPrompt = promptParts.join('. ');
       const finalGenre = (selectedGenre || 'pop').toLowerCase();
 
-      const body: Record<string, unknown> = {
+      const data = await generateMusic({
         prompt: finalPrompt,
         genre: finalGenre,
-        user_id: user.id,
-      };
-
-      if (useCustomLyrics) body.lyrics = trimmedLyrics;
-      if (trimmedNegative) body.negative_prompt = trimmedNegative;
-
-      const response = await fetch('http://localhost:8000/generate-music', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(body),
+        ...(useCustomLyrics ? { lyrics: trimmedLyrics } : {}),
+        ...(trimmedNegative ? { negative_prompt: trimmedNegative } : {}),
       });
-
-      if (!response.ok) {
-        let message = 'Помилка генерації';
-        try {
-          const errJson = await response.json();
-          message = errJson?.detail || errJson?.error?.message || message;
-        } catch {
-          // ignore json parse
-        }
-        throw new Error(message);
-      }
-
-      const data = await response.json();
 
       if (data?.track) {
         await refreshUser();
@@ -110,8 +88,10 @@ export function AdvancedPage() {
       } else {
         throw new Error('Сервіс не повернув дані треку');
       }
-    } catch (err: any) {
-      setError(err.message || 'Помилка генерації');
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Помилка генерації';
+      setError(message);
+      await refreshUser();
     } finally {
       setIsGenerating(false);
     }

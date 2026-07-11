@@ -27,18 +27,15 @@ A full-stack clone of Suno's AI music-generation experience:
 
 ### Current music-generation flow (Lyria 3 via Python service)
 
-Both the simple flow (`CreatePage.tsx`) and the advanced flow (`AdvancedPage.tsx`) call the **local Python service directly**, not the Supabase edge function:
+Both the simple flow (`CreatePage.tsx`) and the advanced flow (`AdvancedPage.tsx`) call the **Python generation service** via `src/lib/generateApi.ts` (not the Supabase edge function):
 
-1. Frontend `POST http://localhost:8000/generate-music` with `{ prompt, genre, user_id, lyrics?, negative_prompt? }` (see `GenerateRequest` in `python-service/main.py`).
-2. Service runs a lightweight config preflight (`is_service_ready`: `GOOGLE_AI_API_KEY` + Supabase configured), then checks the user's `profiles.credits >= 10` and **deducts 10 credits** via Supabase REST.
-3. It inserts a `tracks` row with `status: 'pending'`, returns `202 accepted`, and runs generation in a FastAPI `BackgroundTask`.
-4. The background task calls **Google Lyria 3 Pro** (`await client.aio.interactions.create(model="lyria-3-pro-preview", input=<prompt+genre+lyrics/negative>, response_format={"type":"audio","mime_type":"audio/wav","delivery":"inline"})`), polling `interactions.get(id)` until the interaction is `completed`. This returns a full song (up to ~3 min, 44.1 kHz stereo, with vocals + generated lyrics). It base64-decodes `interaction.output_audio.data`, uploads to Supabase Storage bucket `audio` at `generated/{user_id}/{track_id}.{ext}` (ext derived from the returned `mime_type`), and updates the track to `status: 'completed'` with the public `audio_url`, parsed `duration`, and the generated `lyrics` (`interaction.output_text`).
-5. On failure it sets `status: 'failed'` and **refunds** the 10 credits (best-effort). A user without Lyria 3 access is charged then refunded (no model-availability preflight).
-6. Frontend calls `refreshUser()` to re-read credits, and the track surfaces in the Library.
+1. Frontend `POST {VITE_GENERATE_API_URL}/generate-music` with `Authorization: Bearer <supabase_jwt>` and body `{ prompt, genre, lyrics?, negative_prompt? }`.
+2. Service verifies the JWT (`GET {SUPABASE_URL}/auth/v1/user`), ignores spoofed `user_id`, runs preflight (`GOOGLE_AI_API_KEY` + Supabase), and **deducts 10 credits** via `adjust_credits` RPC.
+3. It inserts a `tracks` row with `status: 'pending'`, returns accepted + track, and runs generation in a FastAPI `BackgroundTask`.
+4. The background task calls **Google Lyria 3 Pro**, uploads audio to Storage `generated/{user_id}/{track_id}.{ext}`, sets `completed` (or `failed` + refund).
+5. Create page polls track status until terminal; Library polls all pending/processing rows. `refreshUser()` updates credits.
 
-The service talks to Supabase through `SimpleSupabaseClient` (raw `httpx` REST calls with the service-role key) to avoid the heavy `supabase` Python dependency.
-
-> The commented-out `supabase.functions.invoke('generate-music', ...)` calls in `CreatePage.tsx` are the previous path, kept for reference. The `localhost:8000` URL is hardcoded for local dev.
+The service talks to Supabase through `SimpleSupabaseClient` (raw `httpx` REST with the service-role key).
 
 ### Frontend
 
@@ -102,9 +99,12 @@ supabase db push        # apply tables/ + migrations/
 
 ### Environment variables
 
-- **Frontend** — `suno-clone/.env`: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`.
-- **Python service & edge functions** — root `.env`: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `GOOGLE_AI_API_KEY`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `LIQPAY_PUBLIC_KEY`, `LIQPAY_PRIVATE_KEY`, `SITE_URL` (frontend base URL for payment redirects).
-- All `.env*` files are git-ignored — **never commit secrets.**
+Prefer a **single root `.env`** (see `.env.example`). Vite loads it via `envDir: '..'` in `suno-clone/vite.config.ts`.
+
+- **Frontend** — `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `VITE_GENERATE_API_URL`.
+- **Python service** — `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `GOOGLE_AI_API_KEY`, `CORS_ORIGINS`.
+- **Edge functions / payments** — plus `SITE_URL`, `STRIPE_*`, `LIQPAY_*`.
+- All `.env` files are git-ignored — **never commit secrets.** Copy from `.env.example`.
 
 ## Conventions
 
@@ -117,12 +117,14 @@ supabase db push        # apply tables/ + migrations/
 
 ## Known Gaps / Caveats
 
-- **`localhost:8000` is hardcoded** in `CreatePage.tsx` and `AdvancedPage.tsx` — the Python service must be running locally for generation to work; there is no deployed generation URL wired in.
+- **Generation URL** — set `VITE_GENERATE_API_URL` (default `http://localhost:8000`). Production must point at the deployed Python service, not localhost.
+- **Python JWT auth** — `/generate-music` requires `Authorization: Bearer <supabase_access_token>`; user id always comes from the verified session (`SUPABASE_ANON_KEY` required for Auth `/user` check).
 - **Lyria 3 access** — generation requires a `GOOGLE_AI_API_KEY` with access to `lyria-3-pro-preview`. There is no model-availability preflight: a key without access is charged 10 credits, generation fails, and the credits are refunded (best-effort).
 - **Payments** — inactive until provider keys are set (`STRIPE_SECRET_KEY`+`STRIPE_WEBHOOK_SECRET` for Stripe, `LIQPAY_PUBLIC_KEY`+`LIQPAY_PRIVATE_KEY` for LiqPay) and `SITE_URL` is configured. The legacy `create-subscription`/`stripe-webhook` functions are superseded by `create-payment`/`payments-webhook` but still deployed-compatible.
-- **Merchant review** — applications land in `merchants` as `pending`; approval currently requires setting `status` via service role (no admin UI yet).
+- **Merchant review** — `/admin/merchants` for `profiles.role = 'admin'`; applications otherwise stay `pending`.
 - **No automated tests** — no test runner is configured; verify changes manually via the dev server and the Python service.
 - **RLS** — policies are enabled but not exhaustively tested for multi-tenant isolation.
+- **Secrets** — `SUPABASE_SERVICE_ROLE_KEY` and `GOOGLE_AI_API_KEY` must be filled in root `.env` (not shipped in git).
 
 ## Repository Map
 

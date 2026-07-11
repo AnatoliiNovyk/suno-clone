@@ -13,33 +13,73 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+async function ensureProfile(userId: string, email: string): Promise<User | null> {
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('*')
+    .eq('id', userId)
+    .maybeSingle();
+
+  if (data && !error) {
+    return data as User;
+  }
+
+  // Create profile if missing (works with RLS insert-own; trigger may also create it).
+  const { data: created, error: insertError } = await supabase
+    .from('profiles')
+    .upsert(
+      {
+        id: userId,
+        email,
+        credits: 50,
+        plan: 'free',
+      },
+      { onConflict: 'id', ignoreDuplicates: true },
+    )
+    .select('*')
+    .maybeSingle();
+
+  if (created && !insertError) {
+    return created as User;
+  }
+
+  // Re-read after concurrent insert / DB trigger.
+  const { data: again } = await supabase
+    .from('profiles')
+    .select('*')
+    .eq('id', userId)
+    .maybeSingle();
+
+  return (again as User) ?? null;
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const fetchProfile = async (userId: string) => {
-    const { data, error } = await supabase
-      .from('profiles')
-      .select('*')
-      .eq('id', userId)
-      .maybeSingle();
-
-    if (data && !error) {
-      setUser(data as User);
+  const fetchProfile = async (userId: string, email?: string) => {
+    const profile = await ensureProfile(userId, email || '');
+    if (profile) {
+      setUser(profile);
     }
   };
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (session?.user) {
-        fetchProfile(session.user.id);
+        fetchProfile(session.user.id, session.user.email || undefined).finally(() =>
+          setLoading(false),
+        );
+      } else {
+        setLoading(false);
       }
-      setLoading(false);
     });
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
       if (session?.user) {
-        fetchProfile(session.user.id);
+        fetchProfile(session.user.id, session.user.email || undefined);
       } else {
         setUser(null);
       }
@@ -58,12 +98,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (error) throw error;
 
     if (data.user) {
-      await supabase.from('profiles').insert({
-        id: data.user.id,
-        email: email,
-        credits: 50,
-        plan: 'free'
-      });
+      await ensureProfile(data.user.id, email);
     }
   };
 
@@ -73,9 +108,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const refreshUser = async () => {
-    const { data: { session } } = await supabase.auth.getSession();
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
     if (session?.user) {
-      await fetchProfile(session.user.id);
+      await fetchProfile(session.user.id, session.user.email || undefined);
     }
   };
 

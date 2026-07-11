@@ -51,78 +51,60 @@ Refer to [`docs/`](docs) for deeper product and design context, including person
 
 ## Environment Configuration
 
-Create a `.env` file at the project root for shared environment variables. The `.gitignore` already excludes it.
+Copy `.env.example` → `.env` at the **repo root** and fill secrets. Vite loads this file via `envDir` in `suno-clone/vite.config.ts` (one env for frontend + Python).
 
-```
-# Root .env (not committed)
-SUPABASE_URL="https://<your-project>.supabase.co"
-SUPABASE_ANON_KEY="<public-anon-key>"
-SUPABASE_SERVICE_ROLE_KEY="<service-role-key>"
-STRIPE_SECRET_KEY="<stripe-test-or-live-key>"
-```
+Required for local music generation:
 
-### Front-end (`suno-clone/`)
+| Variable | Used by |
+|----------|---------|
+| `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` | Frontend |
+| `VITE_GENERATE_API_URL` | Frontend → Python (default `http://localhost:8000`) |
+| `SUPABASE_URL` / `SUPABASE_ANON_KEY` / `SUPABASE_SERVICE_ROLE_KEY` | Python + edge |
+| `GOOGLE_AI_API_KEY` | Python (Lyria 3) |
+| `CORS_ORIGINS` | Python CORS allow-list |
+| `SITE_URL` + Stripe/LiqPay keys | Payments edge functions |
 
-Vite exposes env vars prefixed with `VITE_`. Update `suno-clone/src/lib/supabase.ts` to read from env before shipping or sharing the repo:
-
-```ts
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
-```
-
-Create `suno-clone/.env` (ignored by Git):
-
-```
-VITE_SUPABASE_URL="https://<your-project>.supabase.co"
-VITE_SUPABASE_ANON_KEY="<public-anon-key>"
-```
-
-### Supabase Edge Functions
-
-Edge functions expect secrets via environment variables. When deploying/serving locally, provide:
-
-- `SUPABASE_URL`
-- `SUPABASE_SERVICE_ROLE_KEY`
-- `STRIPE_SECRET_KEY`
-
-Example when running locally:
-
-```bash
-supabase functions serve generate-music --env-file ../.env
-```
+Never commit `.env`. See `.env.example` for the full list.
 
 ## Getting Started
 
-1. **Install dependencies**
+1. **Env**
+   ```bash
+   cp .env.example .env
+   # fill VITE_*, SUPABASE_*, GOOGLE_AI_API_KEY
+   ```
+
+2. **Frontend**
    ```bash
    pnpm install --dir suno-clone
-   ```
-
-2. **Run the front-end**
-   ```bash
    pnpm --dir suno-clone dev
    ```
-   The dev server runs on [http://localhost:5173](http://localhost:5173) by default with hot module reloading.
+   Dev server: [http://localhost:5173](http://localhost:5173)
 
-3. **Build for production**
+3. **Python generation service** (required for Create / Advanced)
+   ```bash
+   cd python-service
+   pip install -r requirements.txt
+   python main.py
+   ```
+   Health: [http://localhost:8000/](http://localhost:8000/) — requests need a Supabase user JWT.
+
+4. **Build for production**
    ```bash
    pnpm --dir suno-clone build
    pnpm --dir suno-clone preview
    ```
+   Set `VITE_GENERATE_API_URL` to your deployed Python URL.
 
-4. **Supabase setup (optional)**
+5. **Supabase**
    ```bash
-   supabase login
-   supabase projects list
    supabase link --project-ref <your-project-ref>
-   supabase db push        # Applies SQL schemas in supabase/tables and migrations
-   supabase functions deploy generate-music
-   supabase functions deploy create-subscription
-   supabase functions deploy stripe-webhook
+   supabase db push
+   supabase functions deploy create-payment
+   supabase functions deploy payments-webhook
    ```
-
-5. **Stripe webhook (optional)**
-   Configure Stripe to call your deployed `stripe-webhook` (e.g., via Supabase Edge Function URL) or use the Stripe CLI while running `supabase functions serve stripe-webhook` locally.
+   Optional admin: `UPDATE profiles SET role = 'admin' WHERE email = 'you@example.com';`  
+   Then open `/admin/merchants`.
 
 ## Key Supabase Tables
 

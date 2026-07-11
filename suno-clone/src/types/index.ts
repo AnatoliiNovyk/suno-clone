@@ -5,6 +5,8 @@ export interface User {
   avatar_url?: string;
   credits: number;
   plan: 'free' | 'pro' | 'premier';
+  /** Present after payments/merchants migration; defaults to 'user'. */
+  role?: 'user' | 'admin';
   created_at: string;
 }
 

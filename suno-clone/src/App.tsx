@@ -9,6 +9,7 @@ import { LibraryPage } from './pages/LibraryPage';
 import { PricingPage } from './pages/PricingPage';
 import { PaymentPage } from './pages/PaymentPage';
 import { MerchantRegisterPage } from './pages/MerchantRegisterPage';
+import { AdminMerchantsPage } from './pages/AdminMerchantsPage';
 import { HubPage } from './pages/HubPage';
 import { ProfilePage } from './pages/ProfilePage';
 import { LoginPage } from './pages/LoginPage';
@@ -30,6 +31,7 @@ function App() {
               <Route path="/pricing" element={<PricingPage />} />
               <Route path="/payment" element={<PaymentPage />} />
               <Route path="/merchant" element={<MerchantRegisterPage />} />
+              <Route path="/admin/merchants" element={<AdminMerchantsPage />} />
               <Route path="/hub" element={<HubPage />} />
               <Route path="/profile" element={<ProfilePage />} />
               <Route path="/login" element={<LoginPage />} />

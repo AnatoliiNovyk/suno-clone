@@ -22,4 +22,4 @@ CREATE POLICY "Users can delete own tracks" ON tracks FOR DELETE USING (auth.uid
 CREATE POLICY "Users can view own subscription" ON subscriptions FOR SELECT USING (auth.uid() = user_id);
 
 -- Credit transactions policies
-CREATE POLICY "Users can view own transactions" ON credit_transactions FOR SELECT USING (auth.uid() = user_id);;
+CREATE POLICY "Users can view own transactions" ON credit_transactions FOR SELECT USING (auth.uid() = user_id);

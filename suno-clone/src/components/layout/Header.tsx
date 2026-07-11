@@ -14,6 +14,9 @@ export function Header() {
     { path: '/library', label: 'Бібліотека' },
     { path: '/hub', label: 'Hub' },
     { path: '/merchant', label: 'Мерчантам' },
+    ...(user?.role === 'admin'
+      ? [{ path: '/admin/merchants', label: 'Admin' }]
+      : []),
   ];
 
   const isActive = (path: string) => location.pathname === path;

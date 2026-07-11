@@ -1,17 +1,19 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
-import { Sparkles, Loader2, Music, Wand2 } from 'lucide-react';
+import { Sparkles, Loader2, Wand2 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
-import { supabase } from '../lib/supabase';
+import { AudioPlayer } from '../components/audio/AudioPlayer';
+import { generateMusic, pollTrackStatus } from '../lib/generateApi';
 import type { Track } from '../types';
 
 export function CreatePage() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const { user, refreshUser } = useAuth();
-  
+
   const [prompt, setPrompt] = useState(searchParams.get('prompt') || '');
   const [isGenerating, setIsGenerating] = useState(false);
+  const [statusLabel, setStatusLabel] = useState('');
   const [generatedTrack, setGeneratedTrack] = useState<Track | null>(null);
   const [error, setError] = useState('');
 
@@ -40,43 +42,46 @@ export function CreatePage() {
 
     setIsGenerating(true);
     setError('');
+    setStatusLabel('Запуск генерації…');
+    setGeneratedTrack(null);
 
     try {
-      // DEV MODE: Call local Python service directly because Docker is not running
-      // Original: 
-      /*
-      const { data, error: fnError } = await supabase.functions.invoke('generate-music', {
-        body: { prompt, genre: 'pop' }
+      const data = await generateMusic({
+        prompt: prompt.trim(),
+        genre: 'pop',
       });
-      */
-      
-      const response = await fetch('http://localhost:8000/generate-music', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
+
+      if (!data?.track?.id) {
+        throw new Error('Сервіс не повернув дані треку');
+      }
+
+      setGeneratedTrack(data.track);
+      setStatusLabel('Генеруємо трек… (це може зайняти кілька хвилин)');
+      await refreshUser();
+
+      const finalTrack = await pollTrackStatus(data.track.id, user.id, {
+        onUpdate: (t) => {
+          setGeneratedTrack(t);
+          if (t.status === 'processing') {
+            setStatusLabel('Обробка аудіо…');
+          }
         },
-        body: JSON.stringify({
-          prompt: prompt,
-          genre: 'pop',
-          user_id: user.id
-        })
       });
 
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.detail || 'Service error');
-      }
+      setGeneratedTrack(finalTrack);
+      await refreshUser();
 
-      const data = await response.json();
-
-      // Only update local state if track data returned
-      if (data?.track) {
-        setGeneratedTrack(data.track);
-        // Refresh to show updated credits
-        await refreshUser();
+      if (finalTrack.status === 'failed') {
+        setError('Генерація не вдалася. Кредити повернуто (якщо можливо).');
+        setStatusLabel('');
+      } else {
+        setStatusLabel('Готово');
       }
-    } catch (err: any) {
-      setError(err.message || 'Помилка генерації');
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Помилка генерації';
+      setError(message);
+      setStatusLabel('');
+      await refreshUser();
     } finally {
       setIsGenerating(false);
     }
@@ -85,7 +90,6 @@ export function CreatePage() {
   return (
     <div className="min-h-screen bg-neutral-900 pt-24 pb-12">
       <div className="max-w-2xl mx-auto px-4">
-        {/* Header */}
         <div className="text-center mb-12">
           <h1 className="text-3xl md:text-4xl font-bold text-neutral-50 mb-4">
             Створи музику
@@ -95,7 +99,6 @@ export function CreatePage() {
           </p>
         </div>
 
-        {/* Credits indicator */}
         {user && (
           <div className="flex justify-center mb-8">
             <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-neutral-700 border border-white/10">
@@ -107,7 +110,6 @@ export function CreatePage() {
           </div>
         )}
 
-        {/* Input */}
         <div className="space-y-4">
           <div className="relative">
             <textarea
@@ -115,31 +117,39 @@ export function CreatePage() {
               onChange={(e) => setPrompt(e.target.value)}
               placeholder="Опиши музику, яку хочеш створити..."
               rows={4}
-              className="w-full bg-neutral-700 border border-neutral-500 rounded-xl px-4 py-4 text-neutral-50 placeholder:text-neutral-300 focus:outline-none focus:border-primary-500 focus:ring-4 focus:ring-primary-500/10 resize-none"
+              maxLength={500}
+              disabled={isGenerating}
+              className="w-full bg-neutral-700 border border-neutral-500 rounded-xl px-4 py-4 text-neutral-50 placeholder:text-neutral-300 focus:outline-none focus:border-primary-500 focus:ring-4 focus:ring-primary-500/10 resize-none disabled:opacity-60"
             />
             <div className="absolute bottom-3 right-3 text-xs text-neutral-300">
               {prompt.length}/500
             </div>
           </div>
 
-          {/* Suggestions */}
           <div className="flex flex-wrap gap-2">
             {suggestions.map((suggestion) => (
               <button
                 key={suggestion}
+                type="button"
                 onClick={() => setPrompt(suggestion)}
-                className="px-3 py-1.5 rounded-full bg-neutral-700/50 border border-white/10 text-sm text-neutral-100 hover:bg-neutral-700 hover:border-white/20 transition-colors"
+                disabled={isGenerating}
+                className="px-3 py-1.5 rounded-full bg-neutral-700/50 border border-white/10 text-sm text-neutral-100 hover:bg-neutral-700 hover:border-white/20 transition-colors disabled:opacity-50"
               >
                 {suggestion}
               </button>
             ))}
           </div>
 
-          {error && (
-            <p className="text-sm text-error">{error}</p>
+          {error && <p className="text-sm text-error">{error}</p>}
+          {statusLabel && !error && (
+            <p className="text-sm text-neutral-100 flex items-center gap-2">
+              {isGenerating && <Loader2 className="w-4 h-4 animate-spin" />}
+              {statusLabel}
+            </p>
           )}
 
           <button
+            type="button"
             onClick={handleGenerate}
             disabled={isGenerating || !prompt.trim()}
             className="w-full flex items-center justify-center gap-2 px-6 py-4 rounded-full bg-gradient-to-r from-[#FF6B35] via-primary-500 to-primary-700 text-white font-semibold shadow-glow-orange hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
@@ -158,9 +168,8 @@ export function CreatePage() {
           </button>
         </div>
 
-        {/* Generated Track */}
         {generatedTrack && (
-          <div className="mt-12 p-6 bg-neutral-700/50 rounded-xl border border-white/10">
+          <div className="mt-12 p-6 bg-neutral-700/50 rounded-xl border border-white/10 space-y-4">
             <div className="flex items-start gap-4">
               <div className="w-20 h-20 rounded-lg bg-neutral-500 overflow-hidden flex-shrink-0">
                 {generatedTrack.cover_url && (
@@ -175,9 +184,12 @@ export function CreatePage() {
                 <h3 className="text-lg font-semibold text-neutral-50 truncate">
                   {generatedTrack.title}
                 </h3>
-                <p className="text-sm text-neutral-100 mt-1">{generatedTrack.genre}</p>
+                <p className="text-sm text-neutral-100 mt-1">
+                  {generatedTrack.genre || 'pop'} · {generatedTrack.status}
+                </p>
                 <div className="mt-4 flex items-center gap-3">
                   <button
+                    type="button"
                     onClick={() => navigate('/library')}
                     className="px-4 py-2 rounded-full bg-primary-500 text-white text-sm font-medium hover:bg-primary-700 transition-colors"
                   >
@@ -189,9 +201,15 @@ export function CreatePage() {
           </div>
         )}
 
-        {/* Link to Advanced */}
+        {generatedTrack?.status === 'completed' && (
+          <div className="mt-4">
+            <AudioPlayer track={generatedTrack} />
+          </div>
+        )}
+
         <div className="mt-8 text-center">
           <button
+            type="button"
             onClick={() => navigate('/advanced')}
             className="text-sm text-neutral-100 hover:text-neutral-50 underline underline-offset-4"
           >

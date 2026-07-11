@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Search, Filter, Music } from 'lucide-react';
+import { Search, Music } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../lib/supabase';
 import { TrackCard } from '../components/ui/TrackCard';
@@ -10,51 +10,14 @@ import type { Track } from '../types';
 export function LibraryPage() {
   const navigate = useNavigate();
   const { user } = useAuth();
-  
+
   const [tracks, setTracks] = useState<Track[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'all' | 'public' | 'private'>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [currentTrack, setCurrentTrack] = useState<Track | null>(null);
 
-  useEffect(() => {
-    if (user) {
-      fetchTracks();
-    } else {
-      setLoading(false);
-    }
-  }, [user, activeTab]);
-
-  useEffect(() => {
-    if (!user || !currentTrack) return;
-    if (currentTrack.status === 'completed' || currentTrack.status === 'failed') return;
-
-    let cancelled = false;
-    const interval = setInterval(async () => {
-      const { data, error } = await supabase
-        .from('tracks')
-        .select('*')
-        .eq('id', currentTrack.id)
-        .eq('user_id', user.id)
-        .maybeSingle();
-
-      if (cancelled || error || !data) return;
-
-      setCurrentTrack(data);
-      setTracks((prev) => prev.map((t) => (t.id === data.id ? data : t)));
-
-      if (data.status === 'completed' || data.status === 'failed') {
-        clearInterval(interval);
-      }
-    }, 2000);
-
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-  }, [user, currentTrack?.id]);
-
-  const fetchTracks = async () => {
+  const fetchTracks = useCallback(async () => {
     if (!user) return;
 
     let query = supabase
@@ -72,14 +35,45 @@ export function LibraryPage() {
     const { data, error } = await query;
 
     if (!error && data) {
-      setTracks(data);
+      setTracks(data as Track[]);
+      setCurrentTrack((prev) => {
+        if (!prev) return prev;
+        const updated = (data as Track[]).find((t) => t.id === prev.id);
+        return updated ?? prev;
+      });
     }
     setLoading(false);
-  };
+  }, [user, activeTab]);
 
-  const filteredTracks = tracks.filter(track =>
-    track.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    track.genre?.toLowerCase().includes(searchQuery.toLowerCase())
+  useEffect(() => {
+    if (user) {
+      setLoading(true);
+      fetchTracks();
+    } else {
+      setLoading(false);
+    }
+  }, [user, activeTab, fetchTracks]);
+
+  // Poll every in-progress track (pending/processing), not only the selected one.
+  useEffect(() => {
+    if (!user) return;
+
+    const hasInFlight = tracks.some(
+      (t) => t.status === 'pending' || t.status === 'processing',
+    );
+    if (!hasInFlight) return;
+
+    const interval = setInterval(() => {
+      fetchTracks();
+    }, 2500);
+
+    return () => clearInterval(interval);
+  }, [user, tracks, fetchTracks]);
+
+  const filteredTracks = tracks.filter(
+    (track) =>
+      track.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      track.genre?.toLowerCase().includes(searchQuery.toLowerCase()),
   );
 
   const handlePlay = (track: Track) => {
@@ -98,6 +92,7 @@ export function LibraryPage() {
             Ваші створені треки будуть зберігатися тут
           </p>
           <button
+            type="button"
             onClick={() => navigate('/login')}
             className="px-6 py-3 rounded-full bg-primary-500 text-white font-medium hover:bg-primary-700 transition-colors"
           >
@@ -111,10 +106,9 @@ export function LibraryPage() {
   return (
     <div className="min-h-screen bg-neutral-900 pt-24 pb-32">
       <div className="max-w-7xl mx-auto px-4">
-        {/* Header */}
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
           <h1 className="text-3xl font-bold text-neutral-50">Моя бібліотека</h1>
-          
+
           <div className="flex items-center gap-3">
             <div className="relative flex-1 md:w-64">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-300" />
@@ -129,11 +123,11 @@ export function LibraryPage() {
           </div>
         </div>
 
-        {/* Tabs */}
         <div className="flex items-center gap-2 mb-8">
           {(['all', 'public', 'private'] as const).map((tab) => (
             <button
               key={tab}
+              type="button"
               onClick={() => setActiveTab(tab)}
               className={`px-4 py-2 rounded-full text-sm font-medium transition-colors ${
                 activeTab === tab
@@ -146,7 +140,6 @@ export function LibraryPage() {
           ))}
         </div>
 
-        {/* Content */}
         {loading ? (
           <div className="flex items-center justify-center py-20">
             <div className="w-8 h-8 border-2 border-primary-500 border-t-transparent rounded-full animate-spin" />
@@ -162,6 +155,7 @@ export function LibraryPage() {
             </p>
             {!searchQuery && (
               <button
+                type="button"
                 onClick={() => navigate('/create')}
                 className="px-6 py-3 rounded-full bg-primary-500 text-white font-medium hover:bg-primary-700 transition-colors"
               >
@@ -178,12 +172,8 @@ export function LibraryPage() {
         )}
       </div>
 
-      {/* Audio Player */}
       {currentTrack && (
-        <AudioPlayer
-          track={currentTrack}
-          onClose={() => setCurrentTrack(null)}
-        />
+        <AudioPlayer track={currentTrack} onClose={() => setCurrentTrack(null)} />
       )}
     </div>
   );
