@@ -11,9 +11,11 @@ export interface CheckoutParams {
   interval: Interval;
   amountMinor: number; // kopiykas / cents
   customerEmail: string;
-  userId?: string;
+  userId: string;
   merchantId?: string;
   siteUrl: string;     // frontend base URL for success/cancel redirects
+  successUrl: string;
+  cancelUrl: string;
   webhookUrl: string;  // this provider's server callback URL
 }
 
@@ -25,7 +27,8 @@ export interface CheckoutResult {
 export type WebhookEvent =
   | {
       type: 'payment_completed';
-      email: string;
+      userId?: string;
+      email?: string;
       planKey: string;
       currency: string;
       amountMinor: number;

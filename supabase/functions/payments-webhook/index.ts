@@ -27,15 +27,32 @@ Deno.serve(async (req) => {
     };
 
     if (event.type === 'payment_completed') {
-      if (!event.email) throw new Error('Webhook event has no customer email');
+      let profileId = event.userId;
 
-      // Find the user profile by email.
-      const profileResp = await fetch(
-        `${supabaseUrl}/rest/v1/profiles?email=eq.${encodeURIComponent(event.email)}&select=id`,
-        { headers: restHeaders },
-      );
-      const [profile] = await profileResp.json();
-      if (!profile) throw new Error(`No profile for email ${event.email}`);
+      if (profileId) {
+        const profileResp = await fetch(
+          `${supabaseUrl}/rest/v1/profiles?id=eq.${encodeURIComponent(profileId)}&select=id`,
+          { headers: restHeaders },
+        );
+        if (!profileResp.ok) throw new Error(`Failed to load profile: ${profileResp.status}`);
+
+        const [profile] = await profileResp.json();
+        if (!profile) throw new Error(`No profile for user_id ${profileId}`);
+        profileId = profile.id;
+      } else {
+        if (!event.email) throw new Error('Webhook event has no user_id or customer email');
+
+        // Legacy fallback for old checkout sessions created before user_id metadata.
+        const profileResp = await fetch(
+          `${supabaseUrl}/rest/v1/profiles?email=eq.${encodeURIComponent(event.email)}&select=id`,
+          { headers: restHeaders },
+        );
+        if (!profileResp.ok) throw new Error(`Failed to load profile: ${profileResp.status}`);
+
+        const [profile] = await profileResp.json();
+        if (!profile) throw new Error(`No profile for email ${event.email}`);
+        profileId = profile.id;
+      }
 
       // Credits come from the plans table — single source of truth.
       const planResp = await fetch(
@@ -45,7 +62,7 @@ Deno.serve(async (req) => {
       const [plan] = await planResp.json();
       if (!plan) throw new Error(`Unknown plan in webhook: ${event.planKey}`);
 
-      const patchResp = await fetch(`${supabaseUrl}/rest/v1/profiles?id=eq.${profile.id}`, {
+      const patchResp = await fetch(`${supabaseUrl}/rest/v1/profiles?id=eq.${profileId}`, {
         method: 'PATCH',
         headers: restHeaders,
         body: JSON.stringify({ plan: event.planKey, credits: plan.monthly_credits }),
@@ -56,7 +73,7 @@ Deno.serve(async (req) => {
         method: 'POST',
         headers: restHeaders,
         body: JSON.stringify({
-          user_id: profile.id,
+          user_id: profileId,
           plan: event.planKey,
           provider: providerKey,
           currency: event.currency,

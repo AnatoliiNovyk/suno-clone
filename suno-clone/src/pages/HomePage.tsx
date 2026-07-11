@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ArrowRight, Play, Sparkles } from 'lucide-react';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuth } from '../hooks/useAuth';
 
 const sampleTracks = [
   { id: '1', title: 'Sunset Vibes', genre: 'Lo-Fi', cover: '/images/suno_music_2.jpg' },

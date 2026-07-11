@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { Lock, Check, ArrowLeft, Loader2, ExternalLink } from 'lucide-react';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuth } from '../hooks/useAuth';
 import { supabase } from '../lib/supabase';
 import {
   fetchPlanPrices,
@@ -53,7 +53,7 @@ export function PaymentPage() {
     // Handle return from the payment gateway
     const status = searchParams.get('subscription');
     if (status === 'success') {
-      navigate('/profile?success=true');
+      navigate('/profile?success=true', { replace: true });
     } else if (status === 'cancelled') {
       setError('Оплату скасовано. Ви можете спробувати знову.');
     }
@@ -91,8 +91,6 @@ export function PaymentPage() {
           planKey: planId,
           currency,
           interval,
-          customerEmail: user.email,
-          userId: user.id,
         }
       });
 

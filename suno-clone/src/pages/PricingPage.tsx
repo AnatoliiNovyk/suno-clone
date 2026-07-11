@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Check, Sparkles, Zap, Crown } from 'lucide-react';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuth } from '../hooks/useAuth';
 import { CURRENCIES, fetchPlanPrices, findPrice, formatMoney } from '../lib/pricing';
 import type { BillingInterval, Currency, PlanPrice } from '../types';
 

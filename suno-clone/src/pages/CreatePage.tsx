@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { Sparkles, Loader2, Wand2 } from 'lucide-react';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuth } from '../hooks/useAuth';
 import { AudioPlayer } from '../components/audio/AudioPlayer';
 import { generateMusic, pollTrackStatus } from '../lib/generateApi';
 import type { Track } from '../types';

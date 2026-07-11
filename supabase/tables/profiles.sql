@@ -5,6 +5,7 @@ CREATE TABLE profiles (
     avatar_url TEXT,
     credits INTEGER DEFAULT 50,
     plan TEXT DEFAULT 'free',
+    role TEXT DEFAULT 'user',
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );

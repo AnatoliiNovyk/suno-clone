@@ -19,8 +19,8 @@ export const stripeProvider: PaymentProvider = {
     const body = new URLSearchParams({
       'mode': 'subscription',
       'customer_email': params.customerEmail,
-      'success_url': `${params.siteUrl}/profile?subscription=success`,
-      'cancel_url': `${params.siteUrl}/pricing?subscription=cancelled`,
+      'success_url': params.successUrl,
+      'cancel_url': params.cancelUrl,
       'line_items[0][price_data][currency]': params.currency.toLowerCase(),
       'line_items[0][price_data][product_data][name]': `Suno ${params.planName} Plan`,
       'line_items[0][price_data][unit_amount]': String(params.amountMinor),
@@ -29,8 +29,8 @@ export const stripeProvider: PaymentProvider = {
       'metadata[plan_key]': params.planKey,
       'metadata[currency]': params.currency,
       'metadata[interval]': params.interval,
+      'metadata[user_id]': params.userId,
     });
-    if (params.userId) body.set('metadata[user_id]', params.userId);
     if (params.merchantId) body.set('metadata[merchant_id]', params.merchantId);
 
     const resp = await fetch('https://api.stripe.com/v1/checkout/sessions', {
@@ -79,6 +79,7 @@ export const stripeProvider: PaymentProvider = {
       const metadata = session.metadata ?? {};
       return {
         type: 'payment_completed',
+        userId: metadata.user_id || undefined,
         email: session.customer_details?.email || session.customer_email || '',
         planKey: metadata.plan_key || metadata.plan_type || 'pro',
         currency: (metadata.currency || session.currency || 'USD').toUpperCase(),

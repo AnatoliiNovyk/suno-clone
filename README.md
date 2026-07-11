@@ -1,22 +1,22 @@
 # Suno Clone
 
-A full-stack clone of the Suno music-generation experience. The project pairs a React + Vite front-end with Supabase Auth, Database, Storage, a Python generation service, and Stripe-powered subscription flows. It is designed as a reference implementation for experimenting with AI-assisted music tools and premium subscription tiers.
+A full-stack clone of the Suno music-generation experience. The project pairs a React + Vite front-end with Supabase Auth, Database, Storage, a Python generation service, and Stripe/LiqPay subscription flows. It is designed as a reference implementation for experimenting with AI-assisted music tools and premium subscription tiers.
 
 ## Features
 
 - 🎛️ **Multi-page React SPA** – Marketing, creation, library, and account views implemented with React Router and Tailwind CSS.
 - 🔐 **Supabase Auth & Profiles** – Email-based auth flow, credit tracking, and profile management stored in Supabase Postgres tables.
 - 🧠 **AI music generation workflow** – Python service (`python-service/main.py`) validates Supabase auth, deducts credits atomically, creates a track record, and runs Google Lyria 3 generation in the background.
-- 💳 **Stripe subscription integration** – Supabase edge functions for creating checkout sessions and handling webhooks to keep subscriptions in sync.
+- 💳 **Multi-provider subscriptions** – Supabase edge functions create Stripe/LiqPay checkout sessions and handle signature-verified webhooks.
 - ☁️ **Supabase Storage access** – Demo audio/cover assets served through public Supabase storage buckets.
 
 ## Tech Stack
 
 | Layer           | Tools |
 |----------------|-------|
-| Front-end       | React 18, TypeScript, Vite, React Router, Tailwind CSS, Radix UI, lucide-react |
-| State & Forms   | React Context, React Hook Form, Zod |
-| Backend & Infra | Supabase (Auth, Database, Storage, Edge Functions), Stripe |
+| Front-end       | React 18, TypeScript, Vite, React Router, Tailwind CSS, lucide-react |
+| State           | React Context |
+| Backend & Infra | Supabase (Auth, Database, Storage, Edge Functions), Stripe, LiqPay |
 | Tooling         | pnpm, ESLint, TypeScript, TailwindCSS Animate |
 
 ## Repository Layout
@@ -37,7 +37,7 @@ A full-stack clone of the Suno music-generation experience. The project pairs a 
 └── supabase/                    # Supabase migrations, tables, and edge functions
     ├── tables/                  # SQL definitions for profiles, tracks, subscriptions...
     ├── migrations/              # Supabase migrations (enables RLS policies, etc.)
-    └── functions/               # Deno edge functions (Stripe integration, music generation)
+    └── functions/               # Deno edge functions (payments + legacy generation proxy)
 ```
 
 Refer to [`docs/`](docs) for deeper product and design context, including personas, component inventories, and system analyses.
@@ -48,7 +48,7 @@ Refer to [`docs/`](docs) for deeper product and design context, including person
 2. **pnpm** ≥ 8 (`corepack enable` or `npm install -g pnpm`)
 3. **Supabase CLI** (optional but recommended for running edge functions locally)<br>
    Install with `pnpm dlx supabase@latest init` or follow the [Supabase CLI docs](https://supabase.com/docs/guides/cli). 
-4. **Stripe account** (or test mode) for subscription flows
+4. **Stripe and/or LiqPay sandbox account** for subscription flows
 
 ## Environment Configuration
 
@@ -112,17 +112,15 @@ Never commit `.env`. See `.env.example` for the full list.
 - `profiles` – stores user metadata and credit balances
 - `tracks` – generated track metadata, storage references, status
 - `credit_transactions` – audit log of credit debits/credits
-- `suno_plans`, `suno_subscriptions`, `subscriptions` – subscription metadata synced with Stripe
+- `plans`, `plan_prices`, `subscriptions` – fixed pricing and subscription metadata synced from Stripe/LiqPay
 
 ## Edge Functions Overview
 
 | Function                 | Purpose |
 |--------------------------|---------|
-| `generate-music`         | Legacy compatibility path; current frontend uses `python-service/main.py` for generation and not this edge function |
-| `create-subscription`    | Creates Stripe checkout sessions for available plans@supabase/functions/create-subscription/index.ts#12-88 |
-| `stripe-webhook`         | (See `supabase/functions/stripe-webhook/index.ts`) Handles Stripe event callbacks to sync subscription state |
-| `create-admin-user`      | Utility for seeding an admin account |
-| `create-bucket-audio-temp` | Ensures audio storage bucket existence |
+| `generate-music`         | Legacy compatibility proxy that forwards the request and JWT to `python-service/main.py` |
+| `create-payment`         | Authenticated provider-agnostic checkout creation for Stripe/LiqPay |
+| `payments-webhook`       | Signature-verified webhook endpoint for Stripe/LiqPay subscription sync |
 
 ## Linting & Formatting
 
@@ -143,7 +141,7 @@ Tailwind classes and design tokens are defined in [`suno-clone/tailwind.config.j
 ## Security Notes
 
 - **Never commit real Supabase or Stripe secrets.** Use environment variables locally and in CI/CD.
-- The current `supabase.ts` file contains placeholder keys for demo purposes. Replace them with environment-driven values for production or public repositories.
+- `suno-clone/src/lib/supabase.ts` reads only `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`; keep service-role and provider secrets server-side only.
 
 ## License
 

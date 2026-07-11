@@ -50,7 +50,7 @@ export const liqpayProvider: PaymentProvider = {
       subscribe: '1',
       subscribe_date_start: startDate,
       subscribe_periodicity: params.interval, // 'month' | 'year'
-      result_url: `${params.siteUrl}/profile?subscription=success`,
+      result_url: params.successUrl,
       server_url: params.webhookUrl,
       language: 'uk',
       // Passed back verbatim in the server callback — carries our own context.
@@ -102,6 +102,7 @@ export const liqpayProvider: PaymentProvider = {
     if (completedStatuses.includes(status)) {
       return {
         type: 'payment_completed',
+        userId: info.user_id ? String(info.user_id) : undefined,
         email: String(info.email ?? callback.sender_email ?? ''),
         planKey: String(info.plan_key ?? 'pro'),
         currency: String(callback.currency ?? info.currency ?? 'UAH').toUpperCase(),

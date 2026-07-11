@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { User, CreditCard, Settings, Trash2, LogOut, Check, Sparkles } from 'lucide-react';
-import { useAuth } from '../contexts/AuthContext';
+import { User, CreditCard, LogOut, Check, Sparkles } from 'lucide-react';
+import { useAuth } from '../hooks/useAuth';
 import { supabase } from '../lib/supabase';
 
 export function ProfilePage() {
@@ -9,7 +9,7 @@ export function ProfilePage() {
   const [searchParams] = useSearchParams();
   const { user, signOut, refreshUser } = useAuth();
   
-  const [activeTab, setActiveTab] = useState<'account' | 'subscription' | 'settings'>('account');
+  const [activeTab, setActiveTab] = useState<'account' | 'subscription'>('account');
   const [displayName, setDisplayName] = useState(user?.display_name || '');
   const [saving, setSaving] = useState(false);
   const [success, setSuccess] = useState(searchParams.get('success') === 'true');
@@ -59,7 +59,6 @@ export function ProfilePage() {
   const tabs = [
     { id: 'account', label: 'Акаунт', icon: User },
     { id: 'subscription', label: 'Підписка', icon: CreditCard },
-    { id: 'settings', label: 'Налаштування', icon: Settings },
   ];
 
   return (
@@ -190,27 +189,6 @@ export function ProfilePage() {
                         Оновити план
                       </button>
                     )}
-                  </div>
-                </div>
-              )}
-
-              {activeTab === 'settings' && (
-                <div className="space-y-6">
-                  <h2 className="text-xl font-bold text-neutral-50">Налаштування</h2>
-                  
-                  <div className="p-4 bg-error/10 border border-error/30 rounded-xl">
-                    <div className="flex items-start gap-3">
-                      <Trash2 className="w-5 h-5 text-error mt-0.5" />
-                      <div>
-                        <p className="font-medium text-error">Видалити акаунт</p>
-                        <p className="text-sm text-neutral-100 mt-1">
-                          Ця дія незворотня. Всі ваші дані будуть видалені.
-                        </p>
-                        <button className="mt-3 px-4 py-2 rounded-full border border-error text-error text-sm font-medium hover:bg-error/10 transition-colors">
-                          Видалити акаунт
-                        </button>
-                      </div>
-                    </div>
                   </div>
                 </div>
               )}

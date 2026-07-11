@@ -10,7 +10,7 @@ These project-specific rules override default behavior and are enforced by the r
 2. **Do not change project files without approval.** The **only** exception is files inside `changelogs/`. For any other edit, propose the change and wait for the user to confirm before writing.
 3. **Write a changelog after every change.** After each edit/fix, add a new file to `changelogs/` named `changelog_YYYY-MM-DD_short-description.md` (date of the change; description in latin letters with hyphens instead of spaces). The entry must describe **how it was before** the change and **what improvement** the change delivers.
 
-> Note: `.github/copilot-instructions.md` contains an older version of these rules plus some now-stale technical claims (e.g. that generation is a "mock" in the edge function). Treat *this* file as the source of truth for architecture; treat the three rules above as binding conventions.
+> Note: `.github/copilot-instructions.md` mirrors the current architecture at a shorter level. Treat the three rules above as binding conventions.
 
 ## What This Project Is
 
@@ -21,7 +21,7 @@ A full-stack clone of Suno's AI music-generation experience:
 - **`supabase/`** — Postgres schema (`tables/`), one RLS migration (`migrations/`), Storage, and Deno **edge functions** (`functions/`). Auth, DB, and Storage are used in production; the `generate-music` edge function is now **legacy** (superseded by `python-service`).
 - **`docs/`** — design system, tokens, and Suno UX analysis. **`imgs/`** — design/marketing assets. **`memories/`** — long-form progress log. **`changelogs/`** — per-change log (see rule 3).
 
-**Stack:** React 18, TypeScript, Vite 6, Tailwind CSS 3 + Radix UI, React Router 6, React Hook Form + Zod, `@supabase/supabase-js` | Supabase (Auth, Postgres, Storage, Deno Edge Functions) | FastAPI + `google-genai` (Lyria 3 Pro via the Gemini Interactions API) | Stripe.
+**Stack:** React 18, TypeScript, Vite, Tailwind CSS 3, React Router 6, lucide-react, `@supabase/supabase-js` | Supabase (Auth, Postgres, Storage, Deno Edge Functions) | FastAPI + `google-genai` (Lyria 3 Pro via the Gemini Interactions API) | Stripe/LiqPay.
 
 ## Architecture & Data Flow
 
@@ -40,7 +40,7 @@ The service talks to Supabase through `SimpleSupabaseClient` (raw `httpx` REST w
 ### Frontend
 
 - `src/App.tsx` — `<BrowserRouter>` → `<AuthProvider>` → `Header` / routed `main` / `Footer`. Routes: `/`, `/create`, `/advanced`, `/library`, `/pricing`, `/payment`, `/hub`, `/profile`, `/login`, `/signup`.
-- **Auth** — `src/contexts/AuthContext.tsx` exposes `useAuth()` with `{ user, loading, signIn, signUp, signOut, refreshUser }`. `user` includes `credits` and `plan`. Gate protected actions on `user`; call `refreshUser()` after anything that changes credits.
+- **Auth** — `src/contexts/AuthContext.tsx` provides auth state; import `useAuth()` from `src/hooks/useAuth.ts` for `{ user, loading, signIn, signUp, signOut, refreshUser }`. `user` includes `credits` and `plan`. Gate protected actions on `user`; call `refreshUser()` after anything that changes credits.
 - **Supabase client** — singleton in `src/lib/supabase.ts`, initialized from `import.meta.env.VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` (throws if missing). Import `{ supabase }`; never re-create the client.
 - **Shared types** — `src/types/index.ts`: `User`, `Track` (`status: 'pending' | 'processing' | 'completed' | 'failed'`), `Subscription`, `PricingPlan`.
 - **Structure** — `pages/` (route views), `components/{layout,audio,ui}/`, `hooks/`, `lib/`, `contexts/`, `types/`. Path alias `@` → `src/` (see `vite.config.ts` / `tsconfig`).
@@ -49,13 +49,13 @@ The service talks to Supabase through `SimpleSupabaseClient` (raw `httpx` REST w
 
 - **Tables** (`supabase/tables/*.sql`): `profiles` (credits, plan, role), `tracks`, `credit_transactions`, `subscriptions` (provider-agnostic: `provider`, `currency`, `amount_minor`, `provider_*_id`), `plans` + `plan_prices` (single source of truth for plan credits and fixed per-currency prices in minor units), `merchants` + `merchant_documents` + `merchant_provider_accounts` (merchant onboarding), plus legacy `suno_plans`/`suno_subscriptions` (vestigial). RLS via `supabase/migrations/1765294229_enable_rls_policies.sql` and `1783468800_payments_multi_provider_and_merchants.sql`. Atomic credit moves go through the `adjust_credits(p_user_id, p_delta)` RPC (service-role only) — never read-modify-write `profiles.credits`.
 - **Storage**: public `audio` bucket. Demo assets at `samples/demo-{1..5}.mp3`; generated audio at `generated/{userId}/{trackId}.{ext}` (extension from Lyria 3's returned `mime_type`, e.g. `.wav`).
-- **Edge functions** (Deno, `supabase/functions/`): `create-payment` (provider-agnostic checkout), `payments-webhook` (signature-verified webhook for all providers), `create-admin-user`, `create-bucket-audio-temp`, plus legacy `create-subscription`/`stripe-webhook` (superseded) and `generate-music`.
+- **Edge functions** (Deno, `supabase/functions/`): `create-payment` (JWT-authenticated provider-agnostic checkout), `payments-webhook` (signature-verified webhook for all providers), and legacy-compatible `generate-music` (thin JWT-forwarding proxy to Python).
 
 ### Payments (multi-provider, multi-currency)
 
 Provider abstraction lives in `supabase/functions/_shared/payments/`: `provider.ts` (the `PaymentProvider` interface + crypto helpers), `stripe.ts` (USD/EUR, real HMAC webhook verification), `liqpay.ts` (UAH/USD/EUR, `base64(sha1(priv+data+priv))` signatures), `index.ts` (registry — adding a gateway = one file + one registry entry).
 
-Flow: `PricingPage.tsx` (currency selector UAH/USD/EUR + interval) → `/payment?plan=<id>&interval=<i>&currency=<c>` → `PaymentPage.tsx` (provider choice per currency: UAH → LiqPay; USD/EUR → Stripe or LiqPay) invokes `create-payment` with `{ provider, planKey, currency, interval, customerEmail, userId }` → server loads the fixed price from `plan_prices` (never trusts client amounts) → redirect to the gateway → `payments-webhook?provider=<key>` verifies the signature, sets `profiles.plan`/`credits` (credits read from `plans`), and inserts a generalized `subscriptions` row.
+Flow: `PricingPage.tsx` (currency selector UAH/USD/EUR + interval) → `/payment?plan=<id>&interval=<i>&currency=<c>` → `PaymentPage.tsx` (provider choice per currency: UAH → LiqPay; USD/EUR → Stripe or LiqPay) invokes `create-payment` with `{ provider, planKey, currency, interval, merchantId? }` → server verifies the Supabase JWT, derives `userId/email`, loads the fixed price from `plan_prices` (never trusts client amounts) → redirect to the gateway → `payments-webhook?provider=<key>` verifies the signature, uses signed `user_id` metadata first (email only as legacy fallback), sets `profiles.plan`/`credits`, and inserts a generalized `subscriptions` row.
 
 Frontend money helpers are in `suno-clone/src/lib/pricing.ts` (`formatMoney`, `PROVIDERS_FOR_CURRENCY`, fallback price table mirroring the SQL seed). Requires `STRIPE_SECRET_KEY`/`STRIPE_WEBHOOK_SECRET` and/or `LIQPAY_PUBLIC_KEY`/`LIQPAY_PRIVATE_KEY`, plus `SITE_URL` for redirects.
 
@@ -76,7 +76,7 @@ pnpm build      # tsc -b + vite build → dist/  (build:prod for prod mode)
 pnpm preview    # serve the production build
 ```
 
-Note: the npm scripts run `pnpm install --prefer-offline` before each command by design.
+Note: run `pnpm install` explicitly before scripts; the scripts no longer install dependencies implicitly.
 
 ### Python service (`python-service/`)
 
@@ -87,13 +87,15 @@ python main.py                         # uvicorn on 0.0.0.0:8000  (GET / is a he
 python refill_credits.py               # interactive helper to top up a user's credits by email
 ```
 
-Reads env from the **repo-root `.env`** (`load_dotenv("../.env")`): needs `GOOGLE_AI_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`.
+Reads env from the **repo-root `.env`** (`load_dotenv("../.env")`): needs `GOOGLE_AI_API_KEY`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`.
 
 ### Supabase edge functions (optional)
 
 ```bash
-supabase functions serve create-subscription --env-file ../.env
-supabase functions deploy create-subscription
+supabase functions serve create-payment --env-file ../.env
+supabase functions serve payments-webhook --env-file ../.env
+supabase functions deploy create-payment
+supabase functions deploy payments-webhook
 supabase db push        # apply tables/ + migrations/
 ```
 
@@ -113,7 +115,7 @@ Prefer a **single root `.env`** (see `.env.example`). Vite loads it via `envDir:
 ## Conventions
 
 - **Styling** — Tailwind with a dark-first design system in `tailwind.config.js`. Background `#0A0A0A` (`neutral-900`), primary/accent orange `#FF5722` (`primary` / `ring` / `accent`). Fonts: `font-display` (Reckless Neue serif), `font-body` (Inter), `font-mono`. Custom tokens include `shadow-glow-orange`, `animate-pulse-glow`, `animate-shimmer`. `darkMode: 'class'`.
-- **UI components** — prefer the already-installed Radix primitives (`@radix-ui/*`) and `class-variance-authority` + `clsx` + `tailwind-merge` (`cn()` in `src/lib/utils.ts`). `components.json` configures the shadcn-style setup.
+- **UI dependencies** — keep direct dependencies minimal; add UI libraries only when they are actually used by `src/`.
 - **Single-row queries** — use `.maybeSingle()`.
 - **Loading states** — boolean state + spinning Lucide icon (`<Loader2 className="animate-spin" />`).
 - **Credits** — 10 credits per generation; 50 on signup. Plans: `free` / `pro` / `premier`.
@@ -124,7 +126,7 @@ Prefer a **single root `.env`** (see `.env.example`). Vite loads it via `envDir:
 - **Generation URL** — set `VITE_GENERATE_API_URL` (default `http://localhost:8000`). Production must point at the deployed Python service, not localhost.
 - **Python JWT auth** — `/generate-music` requires `Authorization: Bearer <supabase_access_token>`; user id always comes from the verified session (`SUPABASE_ANON_KEY` required for Auth `/user` check).
 - **Lyria 3 access** — generation requires a `GOOGLE_AI_API_KEY` with access to `lyria-3-pro-preview`. There is no model-availability preflight: a key without access is charged 10 credits, generation fails, and the credits are refunded (best-effort).
-- **Payments** — inactive until provider keys are set (`STRIPE_SECRET_KEY`+`STRIPE_WEBHOOK_SECRET` for Stripe, `LIQPAY_PUBLIC_KEY`+`LIQPAY_PRIVATE_KEY` for LiqPay) and `SITE_URL` is configured. The legacy `create-subscription`/`stripe-webhook` functions are superseded by `create-payment`/`payments-webhook` but still deployed-compatible.
+- **Payments** — inactive until provider keys are set (`STRIPE_SECRET_KEY`+`STRIPE_WEBHOOK_SECRET` for Stripe, `LIQPAY_PUBLIC_KEY`+`LIQPAY_PRIVATE_KEY` for LiqPay) and `SITE_URL` is configured.
 - **Merchant review** — `/admin/merchants` for `profiles.role = 'admin'`; applications otherwise stay `pending`.
 - **No automated tests** — no test runner is configured; verify changes manually via the dev server and the Python service.
 - **RLS** — policies are enabled but not exhaustively tested for multi-tenant isolation.
@@ -149,5 +151,5 @@ Prefer a **single root `.env`** (see `.env.example`). Vite loads it via `envDir:
 └── supabase/
     ├── tables/               # SQL table definitions
     ├── migrations/           # RLS policies
-    └── functions/            # Deno edge functions (Stripe live; generate-music legacy)
+    └── functions/            # Deno edge functions (payments + generate-music proxy)
 ```

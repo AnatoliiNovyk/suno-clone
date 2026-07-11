@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Sparkles, Loader2, Music, ChevronDown, ChevronUp, Mic, Upload, Wand2 } from 'lucide-react';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuth } from '../hooks/useAuth';
 import { generateMusic } from '../lib/generateApi';
 
 const genres = [

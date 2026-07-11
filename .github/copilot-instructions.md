@@ -1,32 +1,31 @@
 # Suno Clone - AI Agent Instructions
 
 ## Project Overview
-Full-stack music generation platform (Suno.com clone) with React/Vite frontend and Supabase backend. Users generate AI music using credits, with Stripe subscriptions for premium tiers.
+Full-stack music generation platform (Suno.com clone) with React/Vite frontend and Supabase backend. Users generate AI music using credits, with Stripe/LiqPay subscriptions for premium tiers.
 
-**Stack**: React 18 + TypeScript + Vite | Tailwind CSS + Radix UI | Supabase (Auth, DB, Storage, Edge Functions) | Stripe
+**Stack**: React 18 + TypeScript + Vite | Tailwind CSS + lucide-react | Supabase (Auth, DB, Storage, Edge Functions) | Stripe/LiqPay | Python FastAPI + Google Lyria 3
 
 ## Architecture
 
 ### Frontend (`suno-clone/`)
 - **Single-page app** with `react-router-dom` - all pages wrapped in `<BrowserRouter>` in [App.tsx](../suno-clone/src/App.tsx)
-- **Global auth state** via React Context in [AuthContext.tsx](../suno-clone/src/contexts/AuthContext.tsx) - `useAuth()` hook provides `user`, `signIn`, `signOut`, `refreshUser`
+- **Global auth state** via React Context in [AuthContext.tsx](../suno-clone/src/contexts/AuthContext.tsx); import `useAuth()` from [useAuth.ts](../suno-clone/src/hooks/useAuth.ts)
 - **Credit system**: Check `user.credits` before music generation; refresh after operations with `refreshUser()`
 - **Pages structure**: `/create` (music generation), `/library` (user tracks), `/pricing` (subscription plans), `/profile` (user settings), `/hub` (public feed)
 
 ### Backend (`supabase/`)
-- **Database tables** defined in `supabase/tables/*.sql`: `profiles` (user credits/plan), `tracks` (generated music), `subscriptions` (Stripe sync)
+- **Database tables** defined in `supabase/tables/*.sql`: `profiles` (user credits/plan/role), `tracks` (generated music), `plans`/`plan_prices`, `subscriptions` (Stripe/LiqPay sync)
 - **Edge functions** (Deno runtime): 
-  - `generate-music` - validates auth, deducts 10 credits, creates track record, returns mock audio URL
-  - `create-subscription` - creates Stripe checkout session
-  - `stripe-webhook` - syncs subscription status
+  - `create-payment` - requires Bearer JWT, derives `userId/email` server-side, creates Stripe/LiqPay checkout
+  - `payments-webhook` - verifies provider signatures and syncs profile/subscription state
+  - `generate-music` - legacy compatibility proxy to `python-service/main.py`
 - **Storage bucket**: `audio` (public, 50MB limit) stores demo tracks at `/samples/demo-{1-5}.mp3`
 
 ### Data Flow
-1. User submits prompt on [CreatePage.tsx](../suno-clone/src/pages/CreatePage.tsx)
-2. Calls `supabase.functions.invoke('generate-music', { body: { prompt, genre } })`
-3. Edge function validates JWT, checks credits ≥ 10, deducts credits, inserts track row
-4. Frontend calls `refreshUser()` to update displayed credits
-5. Track appears in Library with `audio_url` pointing to Storage
+1. User submits prompt on [CreatePage.tsx](../suno-clone/src/pages/CreatePage.tsx) or [AdvancedPage.tsx](../suno-clone/src/pages/AdvancedPage.tsx)
+2. Frontend calls `{VITE_GENERATE_API_URL}/generate-music` with `Authorization: Bearer <supabase_jwt>`
+3. Python service validates JWT, deducts credits through `adjust_credits`, inserts a pending track, runs Lyria 3, uploads audio, and updates status
+4. Frontend refreshes user credits and polls the track row until `completed` or `failed`
 
 ## Key Conventions
 
@@ -47,7 +46,7 @@ import { supabase } from '../lib/supabase';
 - **Dark theme**: Default background `bg-neutral-900`, text `text-neutral-50`
 - **Primary color**: Orange gradient `from-[#FF6B35] via-primary-500 to-primary-700` for CTAs
 - **Custom tokens**: [tailwind.config.js](../suno-clone/tailwind.config.js) defines `shadow-glow-orange`, font families `font-display` (Reckless Neue), `font-body` (Inter)
-- **Radix UI components**: Prefer Radix primitives (already installed) over custom implementations
+- **UI dependencies**: Keep dependencies minimal; add component libraries only when the current UI needs them.
 
 ### Error Handling
 Edge functions return structured errors:
@@ -66,35 +65,35 @@ pnpm dev              # Vite dev server on http://localhost:5173
 
 ### Testing Edge Functions
 ```bash
-supabase functions serve generate-music --env-file ../.env
+supabase functions serve create-payment --env-file ../.env
+supabase functions serve payments-webhook --env-file ../.env
 # Test: curl -X POST ... with Authorization: Bearer <jwt>
 ```
 
 ### Environment Variables
-- **Frontend**: `.env` in `suno-clone/` with `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`
-- **Edge functions**: Root `.env` with `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `STRIPE_SECRET_KEY`, `GOOGLE_AI_API_KEY`
-- **⚠️ Current state**: Hardcoded credentials in [lib/supabase.ts](../suno-clone/src/lib/supabase.ts) - migrate to env vars before production
+- **Frontend**: root `.env` loaded by Vite `envDir`, with `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `VITE_GENERATE_API_URL`
+- **Python service**: `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `GOOGLE_AI_API_KEY`, `CORS_ORIGINS`
+- **Edge functions**: `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `SITE_URL`, `STRIPE_*` and/or `LIQPAY_*`
+- **Current state**: [lib/supabase.ts](../suno-clone/src/lib/supabase.ts) reads env vars only; never hardcode service-role or provider secrets in frontend code.
 
 ### Build & Deploy
 ```bash
-pnpm build            # Outputs to suno-clone/dist/ (~618KB JS bundle)
+pnpm build            # Outputs to suno-clone/dist/
 ```
-Current deployment: https://oma3s6t4r5qr.space.minimax.io (Minimax hosting)
 
 ## Integration Points
 
-### Stripe Subscription Flow
+### Payment Flow
 1. User clicks plan on [PricingPage.tsx](../suno-clone/src/pages/PricingPage.tsx)
-2. Navigate to `/payment?plan=pro` 
-3. [PaymentPage.tsx](../suno-clone/src/pages/PaymentPage.tsx) calls `create-subscription` edge function
-4. Redirects to Stripe Checkout URL
-5. Webhook (`stripe-webhook`) updates `subscriptions` table on success
+2. Navigate to `/payment?plan=<plan>&interval=<month|year>&currency=<UAH|USD|EUR>`
+3. [PaymentPage.tsx](../suno-clone/src/pages/PaymentPage.tsx) calls `create-payment` with `{ provider, planKey, currency, interval }`
+4. `create-payment` validates JWT and derives `userId/email` server-side before creating Stripe/LiqPay checkout
+5. `payments-webhook?provider=<stripe|liqpay>` verifies the provider signature and updates `profiles`/`subscriptions`
 
 ### Music Generation (Google Lyria Integration)
-- Edge function calls Google Lyria API (`generativelanguage.googleapis.com/v1beta/models/lyria:generateMusic`)
-- Process: Creates pending track → Calls Lyria API → Downloads audio → Uploads to Supabase Storage → Updates track status
-- **Fallback mechanism**: Returns demo track from Storage if API fails (`demo-1.mp3` to `demo-5.mp3`)
-- **Cost**: Google Lyria is free (requires `GOOGLE_AI_API_KEY` in environment)
+- Frontend calls the Python FastAPI service directly (`VITE_GENERATE_API_URL`, default `http://localhost:8000`)
+- Legacy edge function `generate-music` is only a JWT-forwarding proxy to Python
+- Process: validates JWT -> adjusts credits atomically -> creates pending track -> calls Lyria 3 -> uploads audio -> updates track status
 - Generated audio stored at `/generated/{userId}/{trackId}.mp3` in Storage bucket
 
 ## Common Patterns
@@ -120,17 +119,15 @@ const { data } = await supabase.from('profiles').select('*').eq('id', userId).ma
 ```
 
 ## Known Gaps
-- **Google Lyria API**: Requires valid `GOOGLE_AI_API_KEY` - falls back to demo tracks if not configured
-- **Stripe not configured**: Requires `STRIPE_SECRET_KEY` in environment
-- **RLS policies**: Enabled but not fully tested for multi-tenant isolation
-- **No tests**: Consider adding Vitest for critical paths
-- **Hardcoded Supabase creds**: Move to environment variables
+- **Google Lyria API**: Requires a valid `GOOGLE_AI_API_KEY` with access to `lyria-3-pro-preview`; failed generation marks the track failed and attempts a credit refund
+- **Payments**: Require provider sandbox/live keys plus `SITE_URL`
+- **RLS policies**: Verify against a staging Supabase project after migrations
+- **No automated tests**: Add targeted tests for payments, generation, and RLS-critical paths before production
 
 ## Quick Reference
-- **Test account**: uzhycqnx@minimax.com / av0SROaPNL
 - **Credit cost**: 10 credits per generation
 - **Default credits**: 50 (on signup)
-- **Plans**: Free (50 credits) | Pro (500/month) | Premier (2500/month)
+- **Plans**: Free (50 credits) | Pro (2500/month) | Premier (10000/month)
 
 ## Відповіді надавай виключно українською мовою.
 
