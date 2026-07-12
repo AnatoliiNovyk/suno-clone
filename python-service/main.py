@@ -299,7 +299,6 @@ async def generate_music_task(
             input=input_text,
             response_format={
                 "type": "audio",
-                "mime_type": "audio/wav",
                 "delivery": "inline",
             },
             timeout=600.0,
