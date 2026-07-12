@@ -12,6 +12,7 @@ export function CreatePage() {
   const { user, refreshUser } = useAuth();
 
   const [prompt, setPrompt] = useState(searchParams.get('prompt') || '');
+  const [title, setTitle] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
   const [statusLabel, setStatusLabel] = useState('');
   const [generatedTrack, setGeneratedTrack] = useState<Track | null>(null);
@@ -49,6 +50,7 @@ export function CreatePage() {
       const data = await generateMusic({
         prompt: prompt.trim(),
         genre: 'pop',
+        ...(title.trim() ? { title: title.trim() } : {}),
       });
 
       if (!data?.track?.id) {
@@ -111,6 +113,16 @@ export function CreatePage() {
         )}
 
         <div className="space-y-4">
+          <input
+            type="text"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="Назва треку (необов'язково)"
+            maxLength={100}
+            disabled={isGenerating}
+            className="w-full bg-neutral-700 border border-neutral-500 rounded-xl px-4 py-3 text-neutral-50 placeholder:text-neutral-300 focus:outline-none focus:border-primary-500 focus:ring-4 focus:ring-primary-500/10 disabled:opacity-60"
+          />
+
           <div className="relative">
             <textarea
               value={prompt}

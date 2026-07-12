@@ -17,6 +17,7 @@ export function AdvancedPage() {
   const { user, refreshUser } = useAuth();
 
   const [prompt, setPrompt] = useState('');
+  const [title, setTitle] = useState('');
   const [lyrics, setLyrics] = useState('');
   const [selectedGenre, setSelectedGenre] = useState('');
   const [customGenre, setCustomGenre] = useState('');
@@ -79,6 +80,7 @@ export function AdvancedPage() {
       const data = await generateMusic({
         prompt: finalPrompt,
         genre: finalGenre,
+        ...(title.trim() ? { title: title.trim() } : {}),
         ...(useCustomLyrics ? { lyrics: trimmedLyrics } : {}),
         ...(trimmedNegative ? { negative_prompt: trimmedNegative } : {}),
       });
@@ -115,6 +117,21 @@ export function AdvancedPage() {
           <p className="text-neutral-100 mt-2">
             Повний контроль над створенням музики (Lyria 3 Pro)
           </p>
+        </div>
+
+        {/* Title */}
+        <div className="mb-6">
+          <label className="block text-sm font-medium text-neutral-100 mb-2">
+            Назва треку
+          </label>
+          <input
+            type="text"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="Необов'язково — інакше візьмемо з опису"
+            maxLength={100}
+            className="w-full bg-neutral-700 border border-neutral-500 rounded-xl px-4 py-3 text-neutral-50 placeholder:text-neutral-300 focus:outline-none focus:border-primary-500"
+          />
         </div>
 
         {/* Prompt */}

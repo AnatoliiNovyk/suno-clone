@@ -9,6 +9,7 @@ export function getGenerateApiBase(): string {
 export interface GenerateMusicPayload {
   prompt: string;
   genre: string;
+  title?: string;
   lyrics?: string;
   negative_prompt?: string;
 }
