@@ -233,18 +233,32 @@ def wav_duration_seconds(container: bytes) -> int:
     return 0
 
 
+def _has_audio_payload(content) -> bool:
+    return bool(getattr(content, "data", None) or getattr(content, "uri", None))
+
+
 def _extract_audio_content(interaction):
     audio = getattr(interaction, "output_audio", None)
-    if audio is not None and getattr(audio, "data", None):
+    if audio is not None and _has_audio_payload(audio):
         return audio
 
     steps = getattr(interaction, "steps", None) or []
     for step in steps:
         contents = getattr(step, "content", None) or []
         for content in contents:
-            if getattr(content, "type", None) == "audio" and getattr(content, "data", None):
+            if getattr(content, "type", None) == "audio" and _has_audio_payload(content):
                 return content
     return None
+
+
+async def _download_audio_uri(uri: str) -> tuple[bytes, str | None]:
+    """Fetch audio delivered by URI; returns (bytes, content_type)."""
+    async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
+        resp = await client.get(uri)
+        if resp.status_code in (401, 403):
+            resp = await client.get(uri, headers={"x-goog-api-key": GOOGLE_AI_API_KEY})
+        resp.raise_for_status()
+        return resp.content, resp.headers.get("content-type")
 
 
 class GenerateRequest(BaseModel):
@@ -297,10 +311,8 @@ async def generate_music_task(
         interaction = await client.aio.interactions.create(
             model=LYRIA_MODEL,
             input=input_text,
-            response_format={
-                "type": "audio",
-                "delivery": "inline",
-            },
+            # Lyria 3 rejects mime_type/delivery hints; the model picks both.
+            response_format={"type": "audio"},
             timeout=600.0,
         )
 
@@ -317,11 +329,22 @@ async def generate_music_task(
             raise Exception(f"Lyria 3 interaction did not complete (status={status})")
 
         audio = _extract_audio_content(interaction)
-        if audio is None or not getattr(audio, "data", None):
+        if audio is None:
             raise Exception("No audio returned by Lyria 3")
 
-        audio_bytes = base64.b64decode(audio.data)
-        mime_type = getattr(audio, "mime_type", None) or "audio/wav"
+        content_type = None
+        if getattr(audio, "data", None):
+            audio_bytes = base64.b64decode(audio.data)
+        elif getattr(audio, "uri", None):
+            audio_bytes, content_type = await _download_audio_uri(audio.uri)
+        else:
+            raise Exception("No audio returned by Lyria 3")
+
+        mime_type = (
+            getattr(audio, "mime_type", None)
+            or (content_type or "").split(";")[0].strip()
+            or "audio/wav"
+        )
         file_ext = _AUDIO_EXT_BY_MIME.get(mime_type, "wav")
         generated_lyrics = getattr(interaction, "output_text", None)
 
