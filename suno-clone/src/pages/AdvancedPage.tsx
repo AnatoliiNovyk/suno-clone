@@ -19,6 +19,7 @@ export function AdvancedPage() {
   const [prompt, setPrompt] = useState('');
   const [lyrics, setLyrics] = useState('');
   const [selectedGenre, setSelectedGenre] = useState('');
+  const [customGenre, setCustomGenre] = useState('');
   const [selectedMood, setSelectedMood] = useState('');
   const [instrumental, setInstrumental] = useState(false);
   const [autoLyrics, setAutoLyrics] = useState(true);
@@ -73,7 +74,7 @@ export function AdvancedPage() {
       if (instrumental) promptParts.push('Instrumental, no vocals');
 
       const finalPrompt = promptParts.join('. ');
-      const finalGenre = (selectedGenre || 'pop').toLowerCase();
+      const finalGenre = (customGenre.trim() || selectedGenre || 'pop').toLowerCase();
 
       const data = await generateMusic({
         prompt: finalPrompt,
@@ -226,9 +227,12 @@ export function AdvancedPage() {
                   {genres.slice(0, 12).map((genre) => (
                     <button
                       key={genre}
-                      onClick={() => setSelectedGenre(genre === selectedGenre ? '' : genre)}
+                      onClick={() => {
+                        setSelectedGenre(genre === selectedGenre ? '' : genre);
+                        setCustomGenre('');
+                      }}
                       className={`px-3 py-1.5 rounded-full text-sm ${
-                        selectedGenre === genre
+                        selectedGenre === genre && !customGenre
                           ? 'bg-primary-500 text-white'
                           : 'bg-neutral-700 text-neutral-100 border border-white/10 hover:border-white/20'
                       }`}
@@ -237,6 +241,16 @@ export function AdvancedPage() {
                     </button>
                   ))}
                 </div>
+                <input
+                  type="text"
+                  value={customGenre}
+                  onChange={(e) => {
+                    setCustomGenre(e.target.value);
+                    if (e.target.value.trim()) setSelectedGenre('');
+                  }}
+                  placeholder="Або введіть свій стиль: напр. dark synthwave, ukrainian folk rock…"
+                  className="mt-3 w-full bg-neutral-700 border border-neutral-500 rounded-xl px-3 py-2 text-sm text-neutral-50 placeholder:text-neutral-300 focus:outline-none focus:border-primary-500"
+                />
               </div>
 
               <div>
