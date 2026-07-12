@@ -264,6 +264,7 @@ async def _download_audio_uri(uri: str) -> tuple[bytes, str | None]:
 class GenerateRequest(BaseModel):
     prompt: str = ""
     genre: str = "pop"
+    title: Optional[str] = None
     # Optional client hint; ignored if it does not match the JWT subject.
     user_id: Optional[str] = None
     lyrics: Optional[str] = None
@@ -412,11 +413,12 @@ async def generate_music_endpoint(
     track_id = str(uuid.uuid4())
     prompt = (request.prompt or "").strip()
     genre = (request.genre or "pop").strip() or "pop"
+    title = (request.title or "").strip()[:100]
     try:
         track_data = {
             "id": track_id,
             "user_id": user_id,
-            "title": (prompt[:50] if prompt else "Generated Track"),
+            "title": title or (prompt[:50] if prompt else "Generated Track"),
             "prompt": prompt,
             "genre": genre,
             "status": "pending",
