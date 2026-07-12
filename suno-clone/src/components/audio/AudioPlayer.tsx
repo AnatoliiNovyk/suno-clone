@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Play, Pause, SkipBack, SkipForward, Volume2, VolumeX } from 'lucide-react';
+import { ExportMenu } from '../ui/ExportMenu';
 import type { Track } from '../../types';
 
 interface AudioPlayerProps {
@@ -201,6 +202,9 @@ export function AudioPlayer({ track, onClose }: AudioPlayerProps) {
             </div>
           )}
         </div>
+
+        {/* Export */}
+        <ExportMenu track={track} compact />
 
         {/* Volume */}
         <div className="hidden sm:flex items-center gap-2 w-32">

@@ -1,5 +1,6 @@
 import React from 'react';
 import { Play, Heart, Eye } from 'lucide-react';
+import { ExportMenu } from './ExportMenu';
 import type { Track } from '../../types';
 
 interface TrackCardProps {
@@ -36,6 +37,9 @@ export function TrackCard({ track, onPlay }: TrackCardProps) {
           <span className="flex items-center gap-1">
             <Eye className="w-3.5 h-3.5" />
             {track.plays}
+          </span>
+          <span className="ml-auto">
+            <ExportMenu track={track} />
           </span>
         </div>
       </div>
