@@ -29,10 +29,10 @@ A full-stack clone of Suno's AI music-generation experience:
 
 Both the simple flow (`CreatePage.tsx`) and the advanced flow (`AdvancedPage.tsx`) call the **Python generation service** via `src/lib/generateApi.ts` (not the Supabase edge function):
 
-1. Frontend `POST {VITE_GENERATE_API_URL}/generate-music` with `Authorization: Bearer <supabase_jwt>` and body `{ prompt, genre, lyrics?, negative_prompt? }`.
-2. Service verifies the JWT (`GET {SUPABASE_URL}/auth/v1/user`), ignores spoofed `user_id`, runs preflight (`GOOGLE_AI_API_KEY` + Supabase), and **deducts 10 credits** via `adjust_credits` RPC.
+1. Frontend `POST {VITE_GENERATE_API_URL}/generate-music` with `Authorization: Bearer <supabase_jwt>` and body `{ prompt, genre, mode?, title?, lyrics?, negative_prompt? }`.
+2. Service verifies the JWT (`GET {SUPABASE_URL}/auth/v1/user`), ignores spoofed `user_id`, runs preflight (`GOOGLE_AI_API_KEY` + Supabase), and **deducts credits by mode** (`song` = 10 → `lyria-3-pro-preview`, `sample` = 4 → `lyria-3-clip-preview`; see `GENERATION_COST`/`MODEL_BY_MODE`) via `adjust_credits` RPC.
 3. It inserts a `tracks` row with `status: 'pending'`, returns accepted + track, and runs generation in a FastAPI `BackgroundTask`.
-4. The background task calls **Google Lyria 3 Pro**, uploads audio to Storage `generated/{user_id}/{track_id}.{ext}`, sets `completed` (or `failed` + refund).
+4. The background task calls the selected **Lyria 3** model, uploads audio to Storage `generated/{user_id}/{track_id}.{ext}`, sets `completed` (or `failed` + refund of the same amount).
 5. Create page polls track status until terminal; Library polls all pending/processing rows. `refreshUser()` updates credits.
 
 The service talks to Supabase through `SimpleSupabaseClient` (raw `httpx` REST with the service-role key).
@@ -118,7 +118,7 @@ Prefer a **single root `.env`** (see `.env.example`). Vite loads it via `envDir:
 - **UI dependencies** — keep direct dependencies minimal; add UI libraries only when they are actually used by `src/`.
 - **Single-row queries** — use `.maybeSingle()`.
 - **Loading states** — boolean state + spinning Lucide icon (`<Loader2 className="animate-spin" />`).
-- **Credits** — 10 credits per generation; 50 on signup. Plans: `free` / `pro` / `premier`.
+- **Credits** — 10 credits per full song, 4 per sample (Lyria 3 Clip); 50 on signup. Plans: `free` / `pro` / `premier`.
 - **TypeScript** — keep shared shapes in `src/types/index.ts`; use the `@/` import alias.
 
 ## Known Gaps / Caveats
