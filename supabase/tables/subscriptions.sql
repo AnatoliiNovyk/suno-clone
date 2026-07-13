@@ -12,7 +12,6 @@ CREATE TABLE subscriptions (
     "interval" TEXT DEFAULT 'month',
     provider_customer_id TEXT,
     provider_subscription_id TEXT,
-    merchant_id UUID,
     status TEXT DEFAULT 'active',
     current_period_start TIMESTAMPTZ,
     current_period_end TIMESTAMPTZ,

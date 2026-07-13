@@ -47,7 +47,7 @@ The service talks to Supabase through `SimpleSupabaseClient` (raw `httpx` REST w
 
 ### Backend (Supabase)
 
-- **Tables** (`supabase/tables/*.sql`): `profiles` (credits, plan, role), `tracks`, `credit_transactions`, `subscriptions` (provider-agnostic: `provider`, `currency`, `amount_minor`, `provider_*_id`), `plans` + `plan_prices` (single source of truth for plan credits and fixed per-currency prices in minor units), `merchants` + `merchant_documents` + `merchant_provider_accounts` (merchant onboarding), plus legacy `suno_plans`/`suno_subscriptions` (vestigial). RLS via `supabase/migrations/1765294229_enable_rls_policies.sql` and `1783468800_payments_multi_provider_and_merchants.sql`. Atomic credit moves go through the `adjust_credits(p_user_id, p_delta)` RPC (service-role only) — never read-modify-write `profiles.credits`.
+- **Tables** (`supabase/tables/*.sql`): `profiles` (credits, plan, role), `tracks`, `credit_transactions`, `subscriptions` (provider-agnostic: `provider`, `currency`, `amount_minor`, `provider_*_id`), `plans` + `plan_prices` (single source of truth for plan credits and fixed per-currency prices in minor units), plus legacy `suno_plans`/`suno_subscriptions` (vestigial). RLS via `supabase/migrations/` (merchant objects were later dropped by `1784064000_remove_merchants.sql`). Atomic credit moves go through the `adjust_credits(p_user_id, p_delta)` RPC (service-role only) — never read-modify-write `profiles.credits`.
 - **Storage**: public `audio` bucket. Demo assets at `samples/demo-{1..5}.mp3`; generated audio at `generated/{userId}/{trackId}.{ext}` (extension from Lyria 3's returned `mime_type`, e.g. `.wav`).
 - **Edge functions** (Deno, `supabase/functions/`): `create-payment` (JWT-authenticated provider-agnostic checkout), `payments-webhook` (signature-verified webhook for all providers), and legacy-compatible `generate-music` (thin JWT-forwarding proxy to Python).
 
@@ -55,13 +55,9 @@ The service talks to Supabase through `SimpleSupabaseClient` (raw `httpx` REST w
 
 Provider abstraction lives in `supabase/functions/_shared/payments/`: `provider.ts` (the `PaymentProvider` interface + crypto helpers), `stripe.ts` (USD/EUR, real HMAC webhook verification), `liqpay.ts` (UAH/USD/EUR, `base64(sha1(priv+data+priv))` signatures), `index.ts` (registry — adding a gateway = one file + one registry entry).
 
-Flow: `PricingPage.tsx` (currency selector UAH/USD/EUR + interval) → `/payment?plan=<id>&interval=<i>&currency=<c>` → `PaymentPage.tsx` (provider choice per currency: UAH → LiqPay; USD/EUR → Stripe or LiqPay) invokes `create-payment` with `{ provider, planKey, currency, interval, merchantId? }` → server verifies the Supabase JWT, derives `userId/email`, loads the fixed price from `plan_prices` (never trusts client amounts) → redirect to the gateway → `payments-webhook?provider=<key>` verifies the signature, uses signed `user_id` metadata first (email only as legacy fallback), sets `profiles.plan`/`credits`, and inserts a generalized `subscriptions` row.
+Flow: `PricingPage.tsx` (currency selector UAH/USD/EUR + interval) → `/payment?plan=<id>&interval=<i>&currency=<c>` → `PaymentPage.tsx` (provider choice per currency: UAH → LiqPay; USD/EUR → Stripe or LiqPay) invokes `create-payment` with `{ provider, planKey, currency, interval }` → server verifies the Supabase JWT, derives `userId/email`, loads the fixed price from `plan_prices` (never trusts client amounts) → redirect to the gateway → `payments-webhook?provider=<key>` verifies the signature, uses signed `user_id` metadata first (email only as legacy fallback), sets `profiles.plan`/`credits`, and inserts a generalized `subscriptions` row.
 
 Frontend money helpers are in `suno-clone/src/lib/pricing.ts` (`formatMoney`, `PROVIDERS_FOR_CURRENCY`, fallback price table mirroring the SQL seed). Requires `STRIPE_SECRET_KEY`/`STRIPE_WEBHOOK_SECRET` and/or `LIQPAY_PUBLIC_KEY`/`LIQPAY_PRIVATE_KEY`, plus `SITE_URL` for redirects.
-
-### Merchant onboarding (minimal KYC)
-
-`/merchant` (`MerchantRegisterPage.tsx`): name + email + country + **one document** is enough to submit. Documents upload to the private `merchant-docs` bucket (`{userId}/{merchantId}/...`, owner-scoped RLS); the application lands in `merchants` with `status: 'pending'`; review is done by admins (`profiles.role = 'admin'`, `is_admin()` helper). Gateway credentials are referenced via `merchant_provider_accounts.credentials_ref` — never stored as plaintext.
 
 ## Development Workflows
 
@@ -101,7 +97,7 @@ supabase db push        # apply tables/ + migrations/
 
 ### Fresh Supabase project (bootstrap)
 
-If the Supabase project is gone or you're starting from scratch, **`supabase/bootstrap.sql`** recreates everything in one shot: paste it into Dashboard → SQL Editor and run. It is idempotent (safe to re-run) and creates all tables, `is_admin()`/`adjust_credits()` functions, RLS policies, the `audio` (public) and `merchant-docs` (private) storage buckets, and seeds `plans`/`plan_prices`. Afterwards: update both `.env` files with the new project's URL/keys and deploy the edge functions (`create-payment`, `payments-webhook`).
+If the Supabase project is gone or you're starting from scratch, **`supabase/bootstrap.sql`** recreates everything in one shot: paste it into Dashboard → SQL Editor and run. It is idempotent (safe to re-run) and creates all tables, `is_admin()`/`adjust_credits()` functions, RLS policies, the public `audio` storage bucket, and seeds `plans`/`plan_prices`. Afterwards: update both `.env` files with the new project's URL/keys and deploy the edge functions (`create-payment`, `payments-webhook`).
 
 ### Environment variables
 
@@ -127,7 +123,6 @@ Prefer a **single root `.env`** (see `.env.example`). Vite loads it via `envDir:
 - **Python JWT auth** — `/generate-music` requires `Authorization: Bearer <supabase_access_token>`; user id always comes from the verified session (`SUPABASE_ANON_KEY` required for Auth `/user` check).
 - **Lyria 3 access** — generation requires a `GOOGLE_AI_API_KEY` with access to `lyria-3-pro-preview`. There is no model-availability preflight: a key without access is charged 10 credits, generation fails, and the credits are refunded (best-effort).
 - **Payments** — inactive until provider keys are set (`STRIPE_SECRET_KEY`+`STRIPE_WEBHOOK_SECRET` for Stripe, `LIQPAY_PUBLIC_KEY`+`LIQPAY_PRIVATE_KEY` for LiqPay) and `SITE_URL` is configured.
-- **Merchant review** — `/admin/merchants` for `profiles.role = 'admin'`; applications otherwise stay `pending`.
 - **No automated tests** — no test runner is configured; verify changes manually via the dev server and the Python service.
 - **RLS** — policies are enabled but not exhaustively tested for multi-tenant isolation.
 - **Secrets** — `SUPABASE_SERVICE_ROLE_KEY` and `GOOGLE_AI_API_KEY` must be filled in root `.env` (not shipped in git).

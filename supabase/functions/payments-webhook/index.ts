@@ -81,7 +81,6 @@ Deno.serve(async (req) => {
           interval: event.interval,
           provider_customer_id: event.providerCustomerId ?? null,
           provider_subscription_id: event.providerSubscriptionId ?? null,
-          merchant_id: event.merchantId ?? null,
           status: 'active',
         }),
       });

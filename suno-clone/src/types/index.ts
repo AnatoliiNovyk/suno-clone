@@ -5,7 +5,7 @@ export interface User {
   avatar_url?: string;
   credits: number;
   plan: 'free' | 'pro' | 'premier';
-  /** Present after payments/merchants migration; defaults to 'user'. */
+  /** Defaults to 'user'. */
   role?: 'user' | 'admin';
   created_at: string;
 }
@@ -55,17 +55,6 @@ export interface PlanPrice {
   currency: Currency;
   interval: BillingInterval;
   amount_minor: number;
-}
-
-export interface Merchant {
-  id: string;
-  owner_user_id: string;
-  legal_name: string;
-  contact_email: string;
-  country: string;
-  status: 'pending' | 'approved' | 'rejected';
-  review_note?: string;
-  created_at: string;
 }
 
 export interface PricingPlan {
