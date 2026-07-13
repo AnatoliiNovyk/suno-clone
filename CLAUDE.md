@@ -51,6 +51,10 @@ The service talks to Supabase through `SimpleSupabaseClient` (raw `httpx` REST w
 - **Storage**: public `audio` bucket. Demo assets at `samples/demo-{1..5}.mp3`; generated audio at `generated/{userId}/{trackId}.{ext}` (extension from Lyria 3's returned `mime_type`, e.g. `.wav`).
 - **Edge functions** (Deno, `supabase/functions/`): `create-payment` (JWT-authenticated provider-agnostic checkout), `payments-webhook` (signature-verified webhook for all providers), and legacy-compatible `generate-music` (thin JWT-forwarding proxy to Python).
 
+### Admin panel
+
+`/admin/*` (guarded by `AdminRoute`, `src/components/admin/`) — a CMS for the platform, visible only when `profiles.role = 'admin'` (assign the first admin manually: `UPDATE profiles SET role='admin' WHERE email='...'`). Security lives in the database, not the UI: admin-wide RLS policies (`admin_select_all_*`, `admin_update/delete_any_track`, `plans*/plan_prices*_admin_write`) plus SECURITY DEFINER RPCs with internal `is_admin()` checks — `admin_adjust_credits(user, delta, reason)`, `admin_set_plan`, `admin_set_role` (self-demotion is blocked). Every RPC writes an `admin_actions` audit row. Schema objects live in `supabase/migrations/1784150400_admin_panel_foundation.sql` and `bootstrap.sql`. Phase 1 ships the dashboard; users/tracks/pricing/subscriptions/audit sections are planned follow-ups.
+
 ### Payments (multi-provider, multi-currency)
 
 Provider abstraction lives in `supabase/functions/_shared/payments/`: `provider.ts` (the `PaymentProvider` interface + crypto helpers), `stripe.ts` (USD/EUR, real HMAC webhook verification), `liqpay.ts` (UAH/USD/EUR, `base64(sha1(priv+data+priv))` signatures), `index.ts` (registry — adding a gateway = one file + one registry entry).
