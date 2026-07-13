@@ -130,6 +130,17 @@ CREATE TABLE IF NOT EXISTS plan_prices (
     UNIQUE (plan_key, currency, "interval")
 );
 
+-- Audit log of privileged admin-panel actions (written only by the
+-- SECURITY DEFINER admin_* functions).
+CREATE TABLE IF NOT EXISTS admin_actions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    admin_id UUID NOT NULL,
+    action TEXT NOT NULL,               -- 'adjust_credits' | 'set_plan' | 'set_role' | ...
+    target_user_id UUID,
+    details JSONB,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- ============================================================
 -- 2. FUNCTIONS
 -- ============================================================
@@ -171,6 +182,103 @@ REVOKE ALL ON FUNCTION adjust_credits(UUID, INTEGER) FROM PUBLIC, anon, authenti
 -- The service role (Python service, webhooks) must still be able to call it.
 GRANT EXECUTE ON FUNCTION adjust_credits(UUID, INTEGER) TO service_role;
 
+-- --- Admin-panel RPCs: SECURITY DEFINER + internal is_admin() check. ---
+
+CREATE OR REPLACE FUNCTION admin_adjust_credits(p_user_id UUID, p_delta INTEGER, p_reason TEXT)
+RETURNS INTEGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    new_balance INTEGER;
+BEGIN
+    IF NOT is_admin() THEN
+        RAISE EXCEPTION 'forbidden';
+    END IF;
+    IF p_reason IS NULL OR btrim(p_reason) = '' THEN
+        RAISE EXCEPTION 'reason_required';
+    END IF;
+
+    UPDATE profiles
+    SET credits = COALESCE(credits, 0) + p_delta,
+        updated_at = NOW()
+    WHERE id = p_user_id
+      AND COALESCE(credits, 0) + p_delta >= 0
+    RETURNING credits INTO new_balance;
+
+    IF new_balance IS NULL THEN
+        RAISE EXCEPTION 'insufficient_credits_or_missing_user';
+    END IF;
+
+    INSERT INTO credit_transactions (user_id, amount, type, description)
+    VALUES (p_user_id, p_delta, 'admin_adjustment', btrim(p_reason));
+
+    INSERT INTO admin_actions (admin_id, action, target_user_id, details)
+    VALUES (auth.uid(), 'adjust_credits', p_user_id,
+            jsonb_build_object('delta', p_delta, 'reason', btrim(p_reason), 'new_balance', new_balance));
+
+    RETURN new_balance;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION admin_set_plan(p_user_id UUID, p_plan TEXT)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+    IF NOT is_admin() THEN
+        RAISE EXCEPTION 'forbidden';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM plans WHERE key = p_plan AND active) THEN
+        RAISE EXCEPTION 'unknown_plan';
+    END IF;
+
+    UPDATE profiles SET plan = p_plan, updated_at = NOW() WHERE id = p_user_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'user_not_found';
+    END IF;
+
+    INSERT INTO admin_actions (admin_id, action, target_user_id, details)
+    VALUES (auth.uid(), 'set_plan', p_user_id, jsonb_build_object('plan', p_plan));
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION admin_set_role(p_user_id UUID, p_role TEXT)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+    IF NOT is_admin() THEN
+        RAISE EXCEPTION 'forbidden';
+    END IF;
+    IF p_role NOT IN ('user', 'admin') THEN
+        RAISE EXCEPTION 'invalid_role';
+    END IF;
+    -- An admin cannot demote themselves — prevents locking everyone out.
+    IF p_user_id = auth.uid() AND p_role <> 'admin' THEN
+        RAISE EXCEPTION 'cannot_demote_self';
+    END IF;
+
+    UPDATE profiles SET role = p_role, updated_at = NOW() WHERE id = p_user_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'user_not_found';
+    END IF;
+
+    INSERT INTO admin_actions (admin_id, action, target_user_id, details)
+    VALUES (auth.uid(), 'set_role', p_user_id, jsonb_build_object('role', p_role));
+END;
+$$;
+
+-- Callable by signed-in users; the functions themselves enforce is_admin().
+REVOKE ALL ON FUNCTION admin_adjust_credits(UUID, INTEGER, TEXT) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION admin_adjust_credits(UUID, INTEGER, TEXT) TO authenticated;
+REVOKE ALL ON FUNCTION admin_set_plan(UUID, TEXT) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION admin_set_plan(UUID, TEXT) TO authenticated;
+REVOKE ALL ON FUNCTION admin_set_role(UUID, TEXT) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION admin_set_role(UUID, TEXT) TO authenticated;
+
 -- ============================================================
 -- 3. ROW LEVEL SECURITY
 -- ============================================================
@@ -181,6 +289,7 @@ ALTER TABLE subscriptions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE credit_transactions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE plans ENABLE ROW LEVEL SECURITY;
 ALTER TABLE plan_prices ENABLE ROW LEVEL SECURITY;
+ALTER TABLE admin_actions ENABLE ROW LEVEL SECURITY;
 -- Legacy tables: RLS on with no policies = service-role only (never anon).
 ALTER TABLE suno_plans ENABLE ROW LEVEL SECURITY;
 ALTER TABLE suno_subscriptions ENABLE ROW LEVEL SECURITY;
@@ -225,6 +334,26 @@ DROP POLICY IF EXISTS "plans_public_read" ON plans;
 CREATE POLICY "plans_public_read" ON plans FOR SELECT USING (true);
 DROP POLICY IF EXISTS "plan_prices_public_read" ON plan_prices;
 CREATE POLICY "plan_prices_public_read" ON plan_prices FOR SELECT USING (true);
+
+-- Admin panel: admins read everything, moderate tracks, and manage pricing.
+DROP POLICY IF EXISTS "admin_select_all_profiles" ON profiles;
+CREATE POLICY "admin_select_all_profiles" ON profiles FOR SELECT USING (is_admin());
+DROP POLICY IF EXISTS "admin_select_all_tracks" ON tracks;
+CREATE POLICY "admin_select_all_tracks" ON tracks FOR SELECT USING (is_admin());
+DROP POLICY IF EXISTS "admin_update_any_track" ON tracks;
+CREATE POLICY "admin_update_any_track" ON tracks FOR UPDATE USING (is_admin());
+DROP POLICY IF EXISTS "admin_delete_any_track" ON tracks;
+CREATE POLICY "admin_delete_any_track" ON tracks FOR DELETE USING (is_admin());
+DROP POLICY IF EXISTS "admin_select_all_subscriptions" ON subscriptions;
+CREATE POLICY "admin_select_all_subscriptions" ON subscriptions FOR SELECT USING (is_admin());
+DROP POLICY IF EXISTS "admin_select_all_transactions" ON credit_transactions;
+CREATE POLICY "admin_select_all_transactions" ON credit_transactions FOR SELECT USING (is_admin());
+DROP POLICY IF EXISTS "plans_admin_write" ON plans;
+CREATE POLICY "plans_admin_write" ON plans FOR ALL USING (is_admin()) WITH CHECK (is_admin());
+DROP POLICY IF EXISTS "plan_prices_admin_write" ON plan_prices;
+CREATE POLICY "plan_prices_admin_write" ON plan_prices FOR ALL USING (is_admin()) WITH CHECK (is_admin());
+DROP POLICY IF EXISTS "admin_actions_admin_select" ON admin_actions;
+CREATE POLICY "admin_actions_admin_select" ON admin_actions FOR SELECT USING (is_admin());
 
 -- ============================================================
 -- 4. STORAGE BUCKETS
