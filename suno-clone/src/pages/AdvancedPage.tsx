@@ -16,6 +16,7 @@ export function AdvancedPage() {
   const navigate = useNavigate();
   const { user, refreshUser } = useAuth();
 
+  const [mode, setMode] = useState<'song' | 'sample'>('song');
   const [prompt, setPrompt] = useState('');
   const [title, setTitle] = useState('');
   const [lyrics, setLyrics] = useState('');
@@ -36,6 +37,9 @@ export function AdvancedPage() {
 
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState('');
+
+  // Must mirror GENERATION_COST in python-service/main.py.
+  const generationCost = mode === 'sample' ? 4 : 10;
 
   const toggleSection = (section: keyof typeof expandedSections) => {
     setExpandedSections(prev => ({ ...prev, [section]: !prev[section] }));
@@ -58,7 +62,7 @@ export function AdvancedPage() {
       return;
     }
 
-    if (user.credits < 10) {
+    if (user.credits < generationCost) {
       setError('Недостатньо кредитів');
       return;
     }
@@ -80,6 +84,7 @@ export function AdvancedPage() {
       const data = await generateMusic({
         prompt: finalPrompt,
         genre: finalGenre,
+        mode,
         ...(title.trim() ? { title: title.trim() } : {}),
         ...(useCustomLyrics ? { lyrics: trimmedLyrics } : {}),
         ...(trimmedNegative ? { negative_prompt: trimmedNegative } : {}),
@@ -117,6 +122,43 @@ export function AdvancedPage() {
           <p className="text-neutral-100 mt-2">
             Повний контроль над створенням музики (Lyria 3 Pro)
           </p>
+        </div>
+
+        {/* Generation mode */}
+        <div className="mb-6">
+          <label className="block text-sm font-medium text-neutral-100 mb-2">
+            Тип генерації
+          </label>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => setMode('song')}
+              className={`px-4 py-2 rounded-full text-sm font-medium transition-colors ${
+                mode === 'song'
+                  ? 'bg-primary-500 text-white'
+                  : 'bg-neutral-700 text-neutral-100 border border-white/10 hover:border-white/20'
+              }`}
+            >
+              Повна пісня (10 кредитів)
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode('sample')}
+              className={`px-4 py-2 rounded-full text-sm font-medium transition-colors ${
+                mode === 'sample'
+                  ? 'bg-primary-500 text-white'
+                  : 'bg-neutral-700 text-neutral-100 border border-white/10 hover:border-white/20'
+              }`}
+            >
+              Семпл (4 кредити)
+            </button>
+          </div>
+          {mode === 'sample' && (
+            <p className="mt-2 text-xs text-neutral-300">
+              Семпл — короткий кліп із точним контролем ритму (Lyria 3 Clip). Швидше й дешевше,
+              підходить для чернеток та експериментів зі звучанням.
+            </p>
+          )}
         </div>
 
         {/* Title */}
@@ -363,7 +405,7 @@ export function AdvancedPage() {
               ) : (
                 <>
                   <Wand2 className="w-5 h-5" />
-                  Створити (10 кредитів)
+                  Створити ({generationCost} {generationCost === 4 ? 'кредити' : 'кредитів'})
                 </>
               )}
             </button>

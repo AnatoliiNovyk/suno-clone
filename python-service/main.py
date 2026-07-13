@@ -25,6 +25,11 @@ SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY") or os.getenv("VITE_SUPABASE_A
 
 # Google Lyria 3 (Pro) — full-song generation via the Gemini Interactions API.
 LYRIA_MODEL = "lyria-3-pro-preview"
+LYRIA_SAMPLE_MODEL = "lyria-3-clip-preview"
+
+# Credits charged per generation mode; refunds must use the same amount.
+GENERATION_COST = {"song": 10, "sample": 4}
+MODEL_BY_MODE = {"song": LYRIA_MODEL, "sample": LYRIA_SAMPLE_MODEL}
 
 # CORS: comma-separated origins, or "*" for wide-open (dev only).
 _cors_raw = (os.getenv("CORS_ORIGINS") or "http://localhost:5173,http://localhost:4173,http://127.0.0.1:5173").strip()
@@ -264,6 +269,7 @@ async def _download_audio_uri(uri: str) -> tuple[bytes, str | None]:
 class GenerateRequest(BaseModel):
     prompt: str = ""
     genre: str = "pop"
+    mode: str = "song"  # 'song' (full track) | 'sample' (short clip)
     title: Optional[str] = None
     # Optional client hint; ignored if it does not match the JWT subject.
     user_id: Optional[str] = None
@@ -294,8 +300,10 @@ async def generate_music_task(
     *,
     lyrics: str | None = None,
     negative_prompt: str | None = None,
+    model: str = LYRIA_MODEL,
+    cost: int = GENERATION_COST["song"],
 ):
-    print(f"[Task] Starting Lyria 3 generation for track {track_id}")
+    print(f"[Task] Starting Lyria 3 generation for track {track_id} (model={model})")
 
     if not supabase_client:
         print("[Error] Supabase client not initialized")
@@ -310,7 +318,7 @@ async def generate_music_task(
         client = genai.Client(api_key=GOOGLE_AI_API_KEY)
 
         interaction = await client.aio.interactions.create(
-            model=LYRIA_MODEL,
+            model=model,
             input=input_text,
             # Lyria 3 rejects mime_type/delivery hints; the model picks both.
             response_format={"type": "audio"},
@@ -379,10 +387,10 @@ async def generate_music_task(
             except Exception:
                 print(f"[Error] Failed to mark track {track_id} as failed: {traceback.format_exc()}")
             try:
-                await supabase_client.adjust_credits(user_id, 10)
+                await supabase_client.adjust_credits(user_id, cost)
             except Exception:
                 print(
-                    f"[CRITICAL] Refund of 10 credits FAILED for user {user_id} "
+                    f"[CRITICAL] Refund of {cost} credits FAILED for user {user_id} "
                     f"(track {track_id}): {traceback.format_exc()}"
                 )
 
@@ -402,8 +410,13 @@ async def generate_music_endpoint(
     if request.user_id and request.user_id != user_id:
         raise HTTPException(status_code=403, detail="user_id does not match authenticated user")
 
+    mode = (request.mode or "song").strip().lower()
+    if mode not in GENERATION_COST:
+        raise HTTPException(status_code=400, detail="mode must be 'song' or 'sample'")
+    cost = GENERATION_COST[mode]
+
     try:
-        credits_remaining = await supabase_client.adjust_credits(user_id, -10)
+        credits_remaining = await supabase_client.adjust_credits(user_id, -cost)
     except InsufficientCreditsError:
         raise HTTPException(status_code=402, detail="Insufficient credits")
     except Exception as e:
@@ -431,7 +444,7 @@ async def generate_music_endpoint(
     except Exception as e:
         print(f"Error creating track: {e}")
         try:
-            await supabase_client.adjust_credits(user_id, 10)
+            await supabase_client.adjust_credits(user_id, cost)
         except Exception:
             print(
                 f"[CRITICAL] Refund failed for user {user_id} after track-create error: "
@@ -447,6 +460,8 @@ async def generate_music_endpoint(
         user_id,
         lyrics=request.lyrics,
         negative_prompt=request.negative_prompt,
+        model=MODEL_BY_MODE[mode],
+        cost=cost,
     )
     return {
         "status": "accepted",
