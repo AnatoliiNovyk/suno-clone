@@ -104,8 +104,7 @@ Never commit `.env`. See `.env.example` for the full list.
    supabase functions deploy create-payment
    supabase functions deploy payments-webhook
    ```
-   Optional admin: `UPDATE profiles SET role = 'admin' WHERE email = 'you@example.com';`  
-   Then open `/admin/merchants`.
+   Optional admin: `UPDATE profiles SET role = 'admin' WHERE email = 'you@example.com';`
 
 ## Key Supabase Tables
 

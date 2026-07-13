@@ -12,7 +12,6 @@ export interface CheckoutParams {
   amountMinor: number; // kopiykas / cents
   customerEmail: string;
   userId: string;
-  merchantId?: string;
   siteUrl: string;     // frontend base URL for success/cancel redirects
   successUrl: string;
   cancelUrl: string;
@@ -35,7 +34,6 @@ export type WebhookEvent =
       interval: string;
       providerCustomerId?: string;
       providerSubscriptionId?: string;
-      merchantId?: string;
     }
   | { type: 'subscription_cancelled'; providerSubscriptionId: string }
   | { type: 'ignored'; reason: string };

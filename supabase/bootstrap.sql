@@ -6,10 +6,10 @@
 -- CREATE OR REPLACE / DROP POLICY IF EXISTS / ON CONFLICT DO NOTHING).
 --
 -- It recreates everything the app needs:
---   1. Tables (profiles, tracks, credits, subscriptions, plans, merchants)
+--   1. Tables (profiles, tracks, credits, subscriptions, plans)
 --   2. Functions (is_admin, adjust_credits)
 --   3. Row Level Security policies
---   4. Storage buckets (audio — public, merchant-docs — private)
+--   4. Storage buckets (audio — public)
 --   5. Seed data (plans + fixed per-currency prices)
 --
 -- After running it, point .env files at the new project:
@@ -76,7 +76,6 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     "interval" TEXT DEFAULT 'month',
     provider_customer_id TEXT,
     provider_subscription_id TEXT,
-    merchant_id UUID,
     status TEXT DEFAULT 'active',
     current_period_start TIMESTAMPTZ,
     current_period_end TIMESTAMPTZ,
@@ -89,7 +88,6 @@ ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS amount_minor INTEGER;
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS "interval" TEXT DEFAULT 'month';
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS provider_customer_id TEXT;
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS provider_subscription_id TEXT;
-ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS merchant_id UUID;
 
 -- Legacy tables (vestigial, kept so the schema matches the repo)
 CREATE TABLE IF NOT EXISTS suno_plans (
@@ -132,40 +130,8 @@ CREATE TABLE IF NOT EXISTS plan_prices (
     UNIQUE (plan_key, currency, "interval")
 );
 
-CREATE TABLE IF NOT EXISTS merchants (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    owner_user_id UUID NOT NULL,
-    legal_name TEXT NOT NULL,
-    contact_email TEXT NOT NULL,
-    country TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
-    review_note TEXT,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE (owner_user_id)
-);
-
-CREATE TABLE IF NOT EXISTS merchant_documents (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    merchant_id UUID NOT NULL REFERENCES merchants(id) ON DELETE CASCADE,
-    type TEXT NOT NULL,                  -- 'identity' | 'tax_id' | 'company_registration' | ...
-    file_path TEXT NOT NULL,             -- path inside the private 'merchant-docs' bucket
-    status TEXT NOT NULL DEFAULT 'submitted' CHECK (status IN ('submitted', 'accepted', 'rejected')),
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS merchant_provider_accounts (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    merchant_id UUID NOT NULL REFERENCES merchants(id) ON DELETE CASCADE,
-    provider TEXT NOT NULL,              -- 'stripe' | 'liqpay' | ...
-    credentials_ref TEXT,                -- reference to secret storage, never raw keys
-    active BOOLEAN DEFAULT false,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE (merchant_id, provider)
-);
-
 -- ============================================================
--- 2. FUNCTIONS (before policies — merchant policies use is_admin)
+-- 2. FUNCTIONS
 -- ============================================================
 
 CREATE OR REPLACE FUNCTION is_admin()
@@ -215,9 +181,6 @@ ALTER TABLE subscriptions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE credit_transactions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE plans ENABLE ROW LEVEL SECURITY;
 ALTER TABLE plan_prices ENABLE ROW LEVEL SECURITY;
-ALTER TABLE merchants ENABLE ROW LEVEL SECURITY;
-ALTER TABLE merchant_documents ENABLE ROW LEVEL SECURITY;
-ALTER TABLE merchant_provider_accounts ENABLE ROW LEVEL SECURITY;
 -- Legacy tables: RLS on with no policies = service-role only (never anon).
 ALTER TABLE suno_plans ENABLE ROW LEVEL SECURITY;
 ALTER TABLE suno_subscriptions ENABLE ROW LEVEL SECURITY;
@@ -263,38 +226,6 @@ CREATE POLICY "plans_public_read" ON plans FOR SELECT USING (true);
 DROP POLICY IF EXISTS "plan_prices_public_read" ON plan_prices;
 CREATE POLICY "plan_prices_public_read" ON plan_prices FOR SELECT USING (true);
 
--- Merchants: the owner manages their own record; admins review.
-DROP POLICY IF EXISTS "merchants_owner_select" ON merchants;
-CREATE POLICY "merchants_owner_select" ON merchants FOR SELECT
-    USING (auth.uid() = owner_user_id OR is_admin());
-DROP POLICY IF EXISTS "merchants_owner_insert" ON merchants;
-CREATE POLICY "merchants_owner_insert" ON merchants FOR INSERT
-    WITH CHECK (auth.uid() = owner_user_id);
-DROP POLICY IF EXISTS "merchants_owner_update" ON merchants;
-CREATE POLICY "merchants_owner_update" ON merchants FOR UPDATE
-    USING (auth.uid() = owner_user_id AND status = 'pending')
-    WITH CHECK (auth.uid() = owner_user_id AND status = 'pending');
-DROP POLICY IF EXISTS "merchants_admin_update" ON merchants;
-CREATE POLICY "merchants_admin_update" ON merchants FOR UPDATE
-    USING (is_admin())
-    WITH CHECK (is_admin());
-
--- Documents follow their merchant's ownership.
-DROP POLICY IF EXISTS "merchant_documents_owner_select" ON merchant_documents;
-CREATE POLICY "merchant_documents_owner_select" ON merchant_documents FOR SELECT
-    USING (EXISTS (SELECT 1 FROM merchants m WHERE m.id = merchant_id AND (m.owner_user_id = auth.uid() OR is_admin())));
-DROP POLICY IF EXISTS "merchant_documents_owner_insert" ON merchant_documents;
-CREATE POLICY "merchant_documents_owner_insert" ON merchant_documents FOR INSERT
-    WITH CHECK (status = 'submitted' AND EXISTS (SELECT 1 FROM merchants m WHERE m.id = merchant_id AND m.owner_user_id = auth.uid()));
-
--- Provider accounts: owner sees own, admin manages.
-DROP POLICY IF EXISTS "merchant_provider_accounts_owner_select" ON merchant_provider_accounts;
-CREATE POLICY "merchant_provider_accounts_owner_select" ON merchant_provider_accounts FOR SELECT
-    USING (EXISTS (SELECT 1 FROM merchants m WHERE m.id = merchant_id AND (m.owner_user_id = auth.uid() OR is_admin())));
-DROP POLICY IF EXISTS "merchant_provider_accounts_admin_write" ON merchant_provider_accounts;
-CREATE POLICY "merchant_provider_accounts_admin_write" ON merchant_provider_accounts FOR ALL
-    USING (is_admin());
-
 -- ============================================================
 -- 4. STORAGE BUCKETS
 -- ============================================================
@@ -302,11 +233,6 @@ CREATE POLICY "merchant_provider_accounts_admin_write" ON merchant_provider_acco
 -- Public bucket for generated music and demo samples.
 INSERT INTO storage.buckets (id, name, public)
 VALUES ('audio', 'audio', true)
-ON CONFLICT (id) DO NOTHING;
-
--- Private bucket for merchant KYC documents.
-INSERT INTO storage.buckets (id, name, public)
-VALUES ('merchant-docs', 'merchant-docs', false)
 ON CONFLICT (id) DO NOTHING;
 
 -- Audio bucket: public READ only. Uploads/updates/deletes go through the
@@ -317,14 +243,6 @@ DROP POLICY IF EXISTS "Public Delete for audio" ON storage.objects;
 DROP POLICY IF EXISTS "audio_public_read" ON storage.objects;
 CREATE POLICY "audio_public_read" ON storage.objects FOR SELECT
     USING (bucket_id = 'audio');
-
--- Files live under merchant-docs/{auth.uid()}/... — owner-scoped by first path segment.
-DROP POLICY IF EXISTS "merchant_docs_owner_insert" ON storage.objects;
-CREATE POLICY "merchant_docs_owner_insert" ON storage.objects FOR INSERT
-    WITH CHECK (bucket_id = 'merchant-docs' AND (storage.foldername(name))[1] = auth.uid()::text);
-DROP POLICY IF EXISTS "merchant_docs_owner_select" ON storage.objects;
-CREATE POLICY "merchant_docs_owner_select" ON storage.objects FOR SELECT
-    USING (bucket_id = 'merchant-docs' AND ((storage.foldername(name))[1] = auth.uid()::text OR is_admin()));
 
 -- ============================================================
 -- 5. SEED DATA

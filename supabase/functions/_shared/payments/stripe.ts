@@ -31,7 +31,6 @@ export const stripeProvider: PaymentProvider = {
       'metadata[interval]': params.interval,
       'metadata[user_id]': params.userId,
     });
-    if (params.merchantId) body.set('metadata[merchant_id]', params.merchantId);
 
     const resp = await fetch('https://api.stripe.com/v1/checkout/sessions', {
       method: 'POST',
@@ -87,7 +86,6 @@ export const stripeProvider: PaymentProvider = {
         interval: metadata.interval || 'month',
         providerCustomerId: session.customer || undefined,
         providerSubscriptionId: session.subscription || undefined,
-        merchantId: metadata.merchant_id || undefined,
       };
     }
     if (event.type === 'customer.subscription.deleted') {

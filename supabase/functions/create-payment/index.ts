@@ -77,7 +77,7 @@ Deno.serve(async (req) => {
     if (!siteUrl) throw new Error('SITE_URL is not configured');
 
     const user = await requireUser(supabaseUrl, authApiKey, req);
-    const { provider, planKey, currency, interval, merchantId } = await req.json();
+    const { provider, planKey, currency, interval } = await req.json();
 
     if (!provider || !planKey || !currency) {
       throw new HttpError(400, 'INVALID_REQUEST', 'provider, planKey and currency are required');
@@ -102,22 +102,6 @@ Deno.serve(async (req) => {
       'apikey': serviceRoleKey,
       'Authorization': `Bearer ${serviceRoleKey}`,
     };
-
-    let verifiedMerchantId: string | undefined;
-    if (merchantId) {
-      const merchantResp = await fetch(
-        `${supabaseUrl}/rest/v1/merchants?id=eq.${encodeURIComponent(String(merchantId))}` +
-          '&select=id,owner_user_id,status',
-        { headers: restHeaders },
-      );
-      if (!merchantResp.ok) throw new Error(`Failed to validate merchant: ${merchantResp.status}`);
-
-      const [merchant] = await merchantResp.json();
-      if (!merchant || merchant.owner_user_id !== user.id || merchant.status !== 'approved') {
-        throw new HttpError(403, 'MERCHANT_FORBIDDEN', 'Merchant is not available for this user');
-      }
-      verifiedMerchantId = String(merchant.id);
-    }
 
     const planResp = await fetch(
       `${supabaseUrl}/rest/v1/plans?key=eq.${encodeURIComponent(String(planKey))}` +
@@ -160,7 +144,6 @@ Deno.serve(async (req) => {
       amountMinor: price.amount_minor,
       customerEmail: user.email,
       userId: user.id,
-      merchantId: verifiedMerchantId,
       siteUrl,
       successUrl,
       cancelUrl: cancelUrl.toString(),

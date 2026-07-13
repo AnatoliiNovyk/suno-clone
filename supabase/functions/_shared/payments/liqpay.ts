@@ -60,7 +60,6 @@ export const liqpayProvider: PaymentProvider = {
         interval: params.interval,
         email: params.customerEmail,
         user_id: params.userId ?? null,
-        merchant_id: params.merchantId ?? null,
       }),
     };
 
@@ -110,7 +109,6 @@ export const liqpayProvider: PaymentProvider = {
         interval: String(info.interval ?? 'month'),
         providerCustomerId: callback.sender_email || undefined,
         providerSubscriptionId: String(callback.order_id ?? ''),
-        merchantId: info.merchant_id ? String(info.merchant_id) : undefined,
       };
     }
     if (cancelledStatuses.includes(status)) {
