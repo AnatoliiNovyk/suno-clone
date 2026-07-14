@@ -96,6 +96,46 @@ class SimpleSupabaseClient:
             resp.raise_for_status()
             return resp.json()[0]
 
+    async def get_profile(self, user_id):
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(
+                f"{self.url}/rest/v1/profiles?id=eq.{user_id}&select=id,role",
+                headers=self.headers,
+            )
+            resp.raise_for_status()
+            rows = resp.json()
+            return rows[0] if rows else None
+
+    async def get_track(self, track_id):
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(
+                f"{self.url}/rest/v1/tracks?id=eq.{track_id}&select=id,user_id,audio_url",
+                headers=self.headers,
+            )
+            resp.raise_for_status()
+            rows = resp.json()
+            return rows[0] if rows else None
+
+    async def delete_track_row(self, track_id):
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.delete(
+                f"{self.url}/rest/v1/tracks?id=eq.{track_id}",
+                headers=self.headers,
+            )
+            resp.raise_for_status()
+            return resp
+
+    async def delete_storage_object(self, bucket, path):
+        """Delete an object via the Storage API (service-role); ignores 404."""
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.delete(
+                f"{self.url}/storage/v1/object/{bucket}/{path}",
+                headers={"apikey": self.key, "Authorization": f"Bearer {self.key}"},
+            )
+            if resp.status_code not in (404,):
+                resp.raise_for_status()
+            return resp
+
     async def adjust_credits(self, user_id, delta):
         """Atomically adjust the user's credits via the adjust_credits RPC.
 
@@ -165,6 +205,16 @@ async def require_user(
     if credentials is None or credentials.scheme.lower() != "bearer" or not credentials.credentials:
         raise HTTPException(status_code=401, detail="Authorization Bearer token required")
     return await verify_supabase_user(credentials.credentials)
+
+
+async def require_admin(user: dict = Depends(require_user)) -> dict:
+    """Reject non-admins. Role comes from profiles (verified server-side)."""
+    if not supabase_client:
+        raise HTTPException(status_code=500, detail="Server misconfigured")
+    profile = await supabase_client.get_profile(user["id"])
+    if not profile or profile.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin role required")
+    return user
 
 
 def get_config_issues() -> list[str]:
@@ -469,6 +519,32 @@ async def generate_music_endpoint(
         "track": track_data,
         "credits_remaining": credits_remaining,
     }
+
+
+_AUDIO_PUBLIC_PREFIX = "/storage/v1/object/public/audio/"
+
+
+@app.delete("/admin/tracks/{track_id}")
+async def admin_delete_track(track_id: str, _admin: dict = Depends(require_admin)):
+    """Delete a track row and its Storage file (admin-only). File removal is
+    best-effort: a missing/failed file never blocks the row deletion."""
+    if not supabase_client:
+        raise HTTPException(status_code=500, detail="Server misconfigured")
+
+    track = await supabase_client.get_track(track_id)
+    if not track:
+        raise HTTPException(status_code=404, detail="Track not found")
+
+    audio_url = track.get("audio_url") or ""
+    if _AUDIO_PUBLIC_PREFIX in audio_url:
+        path = audio_url.split(_AUDIO_PUBLIC_PREFIX, 1)[1]
+        try:
+            await supabase_client.delete_storage_object("audio", path)
+        except Exception:
+            print(f"[WARN] Failed to delete storage file for track {track_id}: {traceback.format_exc()}")
+
+    await supabase_client.delete_track_row(track_id)
+    return {"status": "deleted", "track_id": track_id}
 
 
 @app.get("/")
