@@ -13,7 +13,7 @@ const sections = [
   { to: '/admin', label: 'Дашборд', icon: LayoutDashboard, end: true, ready: true },
   { to: '/admin/users', label: 'Користувачі', icon: Users, end: false, ready: true },
   { to: '/admin/tracks', label: 'Треки', icon: Music, end: false, ready: true },
-  { to: '/admin/pricing', label: 'Тарифи', icon: CreditCard, end: false, ready: false },
+  { to: '/admin/pricing', label: 'Тарифи', icon: CreditCard, end: false, ready: true },
   { to: '/admin/subscriptions', label: 'Підписки', icon: Receipt, end: false, ready: false },
   { to: '/admin/audit', label: 'Аудит', icon: ScrollText, end: false, ready: false },
 ];
