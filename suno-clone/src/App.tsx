@@ -16,6 +16,8 @@ import { AdminUsersPage } from './pages/admin/AdminUsersPage';
 import { AdminUserDetailPage } from './pages/admin/AdminUserDetailPage';
 import { AdminTracksPage } from './pages/admin/AdminTracksPage';
 import { AdminPricingPage } from './pages/admin/AdminPricingPage';
+import { AdminSubscriptionsPage } from './pages/admin/AdminSubscriptionsPage';
+import { AdminAuditPage } from './pages/admin/AdminAuditPage';
 import { ProfilePage } from './pages/ProfilePage';
 import { LoginPage } from './pages/LoginPage';
 import { SignupPage } from './pages/SignupPage';
@@ -49,6 +51,8 @@ function App() {
                 <Route path="users/:id" element={<AdminUserDetailPage />} />
                 <Route path="tracks" element={<AdminTracksPage />} />
                 <Route path="pricing" element={<AdminPricingPage />} />
+                <Route path="subscriptions" element={<AdminSubscriptionsPage />} />
+                <Route path="audit" element={<AdminAuditPage />} />
               </Route>
               <Route path="/profile" element={<ProfilePage />} />
               <Route path="/login" element={<LoginPage />} />
