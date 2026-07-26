@@ -11,6 +11,10 @@ export interface GenerateMusicPayload {
   genre: string;
   mode?: 'song' | 'sample';
   title?: string;
+  seed?: number;
+  temperature?: number;
+  vocal_gender?: 'any' | 'male' | 'female';
+  style_influence?: number;
   lyrics?: string;
   negative_prompt?: string;
 }

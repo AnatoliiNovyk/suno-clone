@@ -321,18 +321,47 @@ class GenerateRequest(BaseModel):
     genre: str = "pop"
     mode: str = "song"  # 'song' (full track) | 'sample' (short clip)
     title: Optional[str] = None
+    # Optional decoding seed for reproducibility (same seed + prompt → same track).
+    seed: Optional[int] = None
+    # Creativity 0.0–1.0 → generation_config.temperature ("Weirdness").
+    temperature: Optional[float] = None
+    # 'any' | 'male' | 'female' — woven into the prompt.
+    vocal_gender: Optional[str] = None
+    # 0–100 — how strictly to follow the genre; woven into the prompt.
+    style_influence: Optional[int] = None
     # Optional client hint; ignored if it does not match the JWT subject.
     user_id: Optional[str] = None
     lyrics: Optional[str] = None
     negative_prompt: Optional[str] = None
 
 
-def _build_input_text(prompt: str, genre: str, negative_prompt: str | None, lyrics: str | None) -> str:
+def _build_input_text(
+    prompt: str,
+    genre: str,
+    negative_prompt: str | None,
+    lyrics: str | None,
+    vocal_gender: str | None = None,
+    style_influence: int | None = None,
+) -> str:
     parts: list[str] = []
     if prompt and prompt.strip():
         parts.append(prompt.strip())
     if genre and genre.strip():
         parts.append(f"Genre: {genre.strip()}.")
+
+    gender = (vocal_gender or "").strip().lower()
+    if gender == "male":
+        parts.append("Vocals: male voice.")
+    elif gender == "female":
+        parts.append("Vocals: female voice.")
+
+    if style_influence is not None and genre and genre.strip():
+        g = genre.strip()
+        if style_influence > 66:
+            parts.append(f"Strictly adhere to the {g} style.")
+        elif style_influence < 33:
+            parts.append(f"Loosely inspired by {g}; feel free to blend other styles.")
+
     if negative_prompt and negative_prompt.strip():
         parts.append(f"Avoid: {negative_prompt.strip()}.")
 
@@ -340,6 +369,42 @@ def _build_input_text(prompt: str, genre: str, negative_prompt: str | None, lyri
     if lyrics and lyrics.strip():
         text += f"\n\nUse these lyrics:\n{lyrics.strip()}"
     return text
+
+
+async def _create_interaction(
+    client,
+    model: str,
+    input_text: str,
+    seed: int | None,
+    temperature: float | None = None,
+):
+    """Start a Lyria 3 interaction. Passes seed/temperature via
+    generation_config when provided; if this model rejects generation_config
+    (as it does mime_type), retry once without it so these knobs never break
+    generation."""
+    kwargs = {
+        "model": model,
+        "input": input_text,
+        # Lyria 3 rejects mime_type/delivery hints; the model picks both.
+        "response_format": {"type": "audio"},
+        "timeout": 600.0,
+    }
+    gen_config: dict = {}
+    if seed is not None:
+        gen_config["seed"] = seed
+    if temperature is not None:
+        gen_config["temperature"] = temperature
+
+    if gen_config:
+        try:
+            return await client.aio.interactions.create(**kwargs, generation_config=gen_config)
+        except Exception as e:
+            msg = str(e).lower()
+            if any(k in msg for k in ("generation_config", "seed", "temperature", "invalid_request")):
+                print(f"[WARN] generation_config not accepted by model, retrying without it: {e}")
+            else:
+                raise
+    return await client.aio.interactions.create(**kwargs)
 
 
 async def generate_music_task(
@@ -352,6 +417,10 @@ async def generate_music_task(
     negative_prompt: str | None = None,
     model: str = LYRIA_MODEL,
     cost: int = GENERATION_COST["song"],
+    seed: int | None = None,
+    temperature: float | None = None,
+    vocal_gender: str | None = None,
+    style_influence: int | None = None,
 ):
     print(f"[Task] Starting Lyria 3 generation for track {track_id} (model={model})")
 
@@ -364,16 +433,12 @@ async def generate_music_task(
 
         from google import genai
 
-        input_text = _build_input_text(prompt, genre, negative_prompt, lyrics)
+        input_text = _build_input_text(
+            prompt, genre, negative_prompt, lyrics, vocal_gender, style_influence
+        )
         client = genai.Client(api_key=GOOGLE_AI_API_KEY)
 
-        interaction = await client.aio.interactions.create(
-            model=model,
-            input=input_text,
-            # Lyria 3 rejects mime_type/delivery hints; the model picks both.
-            response_format={"type": "audio"},
-            timeout=600.0,
-        )
+        interaction = await _create_interaction(client, model, input_text, seed, temperature)
 
         deadline = time.time() + 600.0
         while (
@@ -512,6 +577,10 @@ async def generate_music_endpoint(
         negative_prompt=request.negative_prompt,
         model=MODEL_BY_MODE[mode],
         cost=cost,
+        seed=request.seed,
+        temperature=request.temperature,
+        vocal_gender=request.vocal_gender,
+        style_influence=request.style_influence,
     )
     return {
         "status": "accepted",
