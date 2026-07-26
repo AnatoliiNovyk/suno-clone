@@ -1,0 +1,4 @@
+# pnpm 10+ reads onlyBuiltDependencies from here, not package.json.
+# esbuild (used by Vite) needs its build script to compile the native binary.
+onlyBuiltDependencies:
+  - esbuild
