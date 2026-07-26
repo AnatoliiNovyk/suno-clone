@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { Sparkles, Loader2, Music, ChevronDown, ChevronUp, Mic, Upload, Wand2 } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
 import { generateMusic } from '../lib/generateApi';
+import { RangeSlider } from '../components/ui/RangeSlider';
 
 const genres = [
   'Pop', 'Rock', 'Hip-Hop', 'Electronic', 'Jazz', 'Classical', 'Country', 'R&B',
@@ -20,6 +21,9 @@ export function AdvancedPage() {
   const [prompt, setPrompt] = useState('');
   const [title, setTitle] = useState('');
   const [seed, setSeed] = useState('');
+  const [vocalGender, setVocalGender] = useState<'any' | 'male' | 'female'>('any');
+  const [weirdness, setWeirdness] = useState(30);
+  const [styleInfluence, setStyleInfluence] = useState(50);
   const [lyrics, setLyrics] = useState('');
   const [selectedGenre, setSelectedGenre] = useState('');
   const [customGenre, setCustomGenre] = useState('');
@@ -89,6 +93,9 @@ export function AdvancedPage() {
         prompt: finalPrompt,
         genre: finalGenre,
         mode,
+        temperature: weirdness / 100,
+        vocal_gender: vocalGender,
+        style_influence: styleInfluence,
         ...(seedValid && trimmedSeed !== '' ? { seed: Number(trimmedSeed) } : {}),
         ...(title.trim() ? { title: title.trim() } : {}),
         ...(useCustomLyrics ? { lyrics: trimmedLyrics } : {}),
@@ -356,6 +363,45 @@ export function AdvancedPage() {
                 </div>
               </div>
 
+              <div className="pt-2 border-t border-white/10 space-y-4">
+                <div>
+                  <label className="block text-sm text-neutral-100 mb-2">Вокал</label>
+                  <div className="flex flex-wrap gap-2">
+                    {([
+                      ['any', 'Будь-який'],
+                      ['male', 'Чоловічий'],
+                      ['female', 'Жіночий'],
+                    ] as const).map(([value, label]) => (
+                      <button
+                        key={value}
+                        type="button"
+                        onClick={() => setVocalGender(value)}
+                        className={`px-3 py-1.5 rounded-full text-sm ${
+                          vocalGender === value
+                            ? 'bg-primary-500 text-white'
+                            : 'bg-neutral-700 text-neutral-100 border border-white/10 hover:border-white/20'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <RangeSlider
+                  label="Химерність (Weirdness)"
+                  value={weirdness}
+                  onChange={setWeirdness}
+                  defaultValue={30}
+                />
+                <RangeSlider
+                  label="Вплив стилю (Style Influence)"
+                  value={styleInfluence}
+                  onChange={setStyleInfluence}
+                  defaultValue={50}
+                />
+              </div>
+
               <div className="pt-2 border-t border-white/10">
                 <label className="block text-xs text-neutral-300 mb-1">
                   Чого уникати (negative prompt)
@@ -368,8 +414,9 @@ export function AdvancedPage() {
                   className="w-full bg-neutral-700 border border-neutral-500 rounded-xl px-3 py-2 text-sm text-neutral-50 placeholder:text-neutral-300 focus:outline-none focus:border-primary-500"
                 />
                 <p className="mt-2 text-xs text-neutral-300">
-                  Lyria 3 Pro генерує повноцінні пісні (до ~3 хв) з вокалом і структурою. Опиши стиль,
-                  інструменти та настрій у полі опису — модель керується природною мовою.
+                  Lyria 3 Pro генерує повноцінні пісні (до ~3 хв). «Химерність» керує креативністю
+                  моделі; вокал і вплив стилю впливають на звучання. Тривалість модель обирає сама
+                  (точний контроль недоступний — використайте режим «Семпл» для короткого кліпу).
                 </p>
               </div>
             </div>
