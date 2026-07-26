@@ -11,6 +11,7 @@ export interface GenerateMusicPayload {
   genre: string;
   mode?: 'song' | 'sample';
   title?: string;
+  seed?: number;
   lyrics?: string;
   negative_prompt?: string;
 }

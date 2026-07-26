@@ -19,6 +19,7 @@ export function AdvancedPage() {
   const [mode, setMode] = useState<'song' | 'sample'>('song');
   const [prompt, setPrompt] = useState('');
   const [title, setTitle] = useState('');
+  const [seed, setSeed] = useState('');
   const [lyrics, setLyrics] = useState('');
   const [selectedGenre, setSelectedGenre] = useState('');
   const [customGenre, setCustomGenre] = useState('');
@@ -40,6 +41,9 @@ export function AdvancedPage() {
 
   // Must mirror GENERATION_COST in python-service/main.py.
   const generationCost = mode === 'sample' ? 4 : 10;
+
+  const trimmedSeed = seed.trim();
+  const seedValid = trimmedSeed === '' || /^\d+$/.test(trimmedSeed);
 
   const toggleSection = (section: keyof typeof expandedSections) => {
     setExpandedSections(prev => ({ ...prev, [section]: !prev[section] }));
@@ -85,6 +89,7 @@ export function AdvancedPage() {
         prompt: finalPrompt,
         genre: finalGenre,
         mode,
+        ...(seedValid && trimmedSeed !== '' ? { seed: Number(trimmedSeed) } : {}),
         ...(title.trim() ? { title: title.trim() } : {}),
         ...(useCustomLyrics ? { lyrics: trimmedLyrics } : {}),
         ...(trimmedNegative ? { negative_prompt: trimmedNegative } : {}),
@@ -174,6 +179,26 @@ export function AdvancedPage() {
             maxLength={100}
             className="w-full bg-neutral-700 border border-neutral-500 rounded-xl px-4 py-3 text-neutral-50 placeholder:text-neutral-300 focus:outline-none focus:border-primary-500"
           />
+        </div>
+
+        {/* Seed */}
+        <div className="mb-6">
+          <label className="block text-sm font-medium text-neutral-100 mb-2">
+            Seed
+          </label>
+          <input
+            type="text"
+            inputMode="numeric"
+            value={seed}
+            onChange={(e) => setSeed(e.target.value)}
+            placeholder="Необов'язково — число для відтворюваності"
+            className={`w-full bg-neutral-700 border rounded-xl px-4 py-3 text-neutral-50 placeholder:text-neutral-300 focus:outline-none ${
+              seedValid ? 'border-neutral-500 focus:border-primary-500' : 'border-error'
+            }`}
+          />
+          <p className="mt-2 text-xs text-neutral-300">
+            Однакове число + опис → однаковий трек. Змініть seed, щоб отримати іншу варіацію.
+          </p>
         </div>
 
         {/* Prompt */}
@@ -394,7 +419,7 @@ export function AdvancedPage() {
           <div className="max-w-2xl mx-auto">
             <button
               onClick={handleGenerate}
-              disabled={isGenerating}
+              disabled={isGenerating || !seedValid}
               className="w-full flex items-center justify-center gap-2 px-6 py-4 rounded-full bg-gradient-to-r from-[#FF6B35] via-primary-500 to-primary-700 text-white font-semibold shadow-glow-orange hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
             >
               {isGenerating ? (

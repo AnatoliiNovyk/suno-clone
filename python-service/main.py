@@ -321,6 +321,8 @@ class GenerateRequest(BaseModel):
     genre: str = "pop"
     mode: str = "song"  # 'song' (full track) | 'sample' (short clip)
     title: Optional[str] = None
+    # Optional decoding seed for reproducibility (same seed + prompt → same track).
+    seed: Optional[int] = None
     # Optional client hint; ignored if it does not match the JWT subject.
     user_id: Optional[str] = None
     lyrics: Optional[str] = None
@@ -342,6 +344,31 @@ def _build_input_text(prompt: str, genre: str, negative_prompt: str | None, lyri
     return text
 
 
+async def _create_interaction(client, model: str, input_text: str, seed: int | None):
+    """Start a Lyria 3 interaction. Passes seed via generation_config when
+    provided; if this model rejects generation_config (as it does mime_type),
+    retry once without it so seed never breaks generation."""
+    kwargs = {
+        "model": model,
+        "input": input_text,
+        # Lyria 3 rejects mime_type/delivery hints; the model picks both.
+        "response_format": {"type": "audio"},
+        "timeout": 600.0,
+    }
+    if seed is not None:
+        try:
+            return await client.aio.interactions.create(
+                **kwargs, generation_config={"seed": seed}
+            )
+        except Exception as e:
+            msg = str(e).lower()
+            if any(k in msg for k in ("generation_config", "seed", "invalid_request")):
+                print(f"[WARN] seed not accepted by model, retrying without it: {e}")
+            else:
+                raise
+    return await client.aio.interactions.create(**kwargs)
+
+
 async def generate_music_task(
     track_id: str,
     prompt: str,
@@ -352,6 +379,7 @@ async def generate_music_task(
     negative_prompt: str | None = None,
     model: str = LYRIA_MODEL,
     cost: int = GENERATION_COST["song"],
+    seed: int | None = None,
 ):
     print(f"[Task] Starting Lyria 3 generation for track {track_id} (model={model})")
 
@@ -367,13 +395,7 @@ async def generate_music_task(
         input_text = _build_input_text(prompt, genre, negative_prompt, lyrics)
         client = genai.Client(api_key=GOOGLE_AI_API_KEY)
 
-        interaction = await client.aio.interactions.create(
-            model=model,
-            input=input_text,
-            # Lyria 3 rejects mime_type/delivery hints; the model picks both.
-            response_format={"type": "audio"},
-            timeout=600.0,
-        )
+        interaction = await _create_interaction(client, model, input_text, seed)
 
         deadline = time.time() + 600.0
         while (
@@ -512,6 +534,7 @@ async def generate_music_endpoint(
         negative_prompt=request.negative_prompt,
         model=MODEL_BY_MODE[mode],
         cost=cost,
+        seed=request.seed,
     )
     return {
         "status": "accepted",

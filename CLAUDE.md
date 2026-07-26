@@ -29,7 +29,7 @@ A full-stack clone of Suno's AI music-generation experience:
 
 Both the simple flow (`CreatePage.tsx`) and the advanced flow (`AdvancedPage.tsx`) call the **Python generation service** via `src/lib/generateApi.ts` (not the Supabase edge function):
 
-1. Frontend `POST {VITE_GENERATE_API_URL}/generate-music` with `Authorization: Bearer <supabase_jwt>` and body `{ prompt, genre, mode?, title?, lyrics?, negative_prompt? }`.
+1. Frontend `POST {VITE_GENERATE_API_URL}/generate-music` with `Authorization: Bearer <supabase_jwt>` and body `{ prompt, genre, mode?, title?, seed?, lyrics?, negative_prompt? }` (`seed` → `generation_config.seed` for reproducibility, sent from the Advanced page; a model that rejects `generation_config` falls back to a seedless retry).
 2. Service verifies the JWT (`GET {SUPABASE_URL}/auth/v1/user`), ignores spoofed `user_id`, runs preflight (`GOOGLE_AI_API_KEY` + Supabase), and **deducts credits by mode** (`song` = 10 → `lyria-3-pro-preview`, `sample` = 4 → `lyria-3-clip-preview`; see `GENERATION_COST`/`MODEL_BY_MODE`) via `adjust_credits` RPC.
 3. It inserts a `tracks` row with `status: 'pending'`, returns accepted + track, and runs generation in a FastAPI `BackgroundTask`.
 4. The background task calls the selected **Lyria 3** model, uploads audio to Storage `generated/{user_id}/{track_id}.{ext}`, sets `completed` (or `failed` + refund of the same amount).
