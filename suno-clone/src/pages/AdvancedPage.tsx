@@ -94,7 +94,9 @@ export function AdvancedPage() {
         genre: finalGenre,
         mode,
         temperature: weirdness / 100,
-        vocal_gender: vocalGender,
+        // An instrumental track has no vocals to gender: sending it anyway put
+        // "Instrumental, no vocals" and "Vocals: male voice." in the same prompt.
+        ...(instrumental ? {} : { vocal_gender: vocalGender }),
         style_influence: styleInfluence,
         ...(seedValid && trimmedSeed !== '' ? { seed: Number(trimmedSeed) } : {}),
         ...(title.trim() ? { title: title.trim() } : {}),
@@ -136,6 +138,13 @@ export function AdvancedPage() {
           </p>
         </div>
 
+        {/* One fieldset locks every control below while the request is in
+            flight — otherwise the knobs stayed editable and only the submit
+            button was disabled. */}
+        <fieldset
+          disabled={isGenerating}
+          className="min-w-0 m-0 p-0 border-0 disabled:opacity-60 transition-opacity"
+        >
         {/* Generation mode */}
         <div className="mb-6">
           <label className="block text-sm font-medium text-neutral-100 mb-2">
@@ -364,29 +373,32 @@ export function AdvancedPage() {
               </div>
 
               <div className="pt-2 border-t border-white/10 space-y-4">
-                <div>
-                  <label className="block text-sm text-neutral-100 mb-2">Вокал</label>
-                  <div className="flex flex-wrap gap-2">
-                    {([
-                      ['any', 'Будь-який'],
-                      ['male', 'Чоловічий'],
-                      ['female', 'Жіночий'],
-                    ] as const).map(([value, label]) => (
-                      <button
-                        key={value}
-                        type="button"
-                        onClick={() => setVocalGender(value)}
-                        className={`px-3 py-1.5 rounded-full text-sm ${
-                          vocalGender === value
-                            ? 'bg-primary-500 text-white'
-                            : 'bg-neutral-700 text-neutral-100 border border-white/10 hover:border-white/20'
-                        }`}
-                      >
-                        {label}
-                      </button>
-                    ))}
+                {/* Nothing to choose when the track has no vocals at all. */}
+                {!instrumental && (
+                  <div>
+                    <label className="block text-sm text-neutral-100 mb-2">Вокал</label>
+                    <div className="flex flex-wrap gap-2">
+                      {([
+                        ['any', 'Будь-який'],
+                        ['male', 'Чоловічий'],
+                        ['female', 'Жіночий'],
+                      ] as const).map(([value, label]) => (
+                        <button
+                          key={value}
+                          type="button"
+                          onClick={() => setVocalGender(value)}
+                          className={`px-3 py-1.5 rounded-full text-sm ${
+                            vocalGender === value
+                              ? 'bg-primary-500 text-white'
+                              : 'bg-neutral-700 text-neutral-100 border border-white/10 hover:border-white/20'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                </div>
+                )}
 
                 <RangeSlider
                   label="Химерність (Weirdness)"
@@ -455,6 +467,7 @@ export function AdvancedPage() {
             </div>
           )}
         </div>
+        </fieldset>
 
         {/* Error */}
         {error && (

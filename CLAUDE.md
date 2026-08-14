@@ -31,9 +31,11 @@ Both the simple flow (`CreatePage.tsx`) and the advanced flow (`AdvancedPage.tsx
 
 1. Frontend `POST {VITE_GENERATE_API_URL}/generate-music` with `Authorization: Bearer <supabase_jwt>` and body `{ prompt, genre, mode?, title?, seed?, temperature?, vocal_gender?, style_influence?, lyrics?, negative_prompt? }`. Advanced-page knobs: `seed`/`temperature` → `generation_config` (reproducibility + "Weirdness"; a model that rejects `generation_config` falls back to a retry without it), `vocal_gender` ('any'|'male'|'female') and `style_influence` (0–100) are woven into the prompt text by `_build_input_text`.
 2. Service verifies the JWT (`GET {SUPABASE_URL}/auth/v1/user`), ignores spoofed `user_id`, runs preflight (`GOOGLE_AI_API_KEY` + Supabase), and **deducts credits by mode** (`song` = 10 → `lyria-3-pro-preview`, `sample` = 4 → `lyria-3-clip-preview`; see `GENERATION_COST`/`MODEL_BY_MODE`) via `adjust_credits` RPC.
-3. It inserts a `tracks` row with `status: 'pending'`, returns accepted + track, and runs generation in a FastAPI `BackgroundTask`.
+3. It inserts a `tracks` row with `status: 'pending'` and `generation_cost` (the amount just charged), returns accepted + track, and runs generation in a FastAPI `BackgroundTask`.
 4. The background task calls the selected **Lyria 3** model, uploads audio to Storage `generated/{user_id}/{track_id}.{ext}`, sets `completed` (or `failed` + refund of the same amount).
 5. Create page polls track status until terminal; Library polls all pending/processing rows. `refreshUser()` updates credits.
+
+**Stuck-track reaper** — a `BackgroundTask` dies with the process, so a restart mid-generation would strand the row in `pending`/`processing` forever with the credits gone. `reap_stuck_tracks()` runs from the FastAPI **lifespan** handler: once at startup (a restart is exactly when tracks get orphaned) and then every `GENERATION_REAPER_INTERVAL_SECONDS`. It fails anything in flight whose `tracks.updated_at` (maintained by the `tracks_set_updated_at` trigger) is older than `GENERATION_STUCK_AFTER_SECONDS`, and refunds `generation_cost`. The status transition is a compare-and-swap (`PATCH …&status=in.(pending,processing)` with `Prefer: return=representation`) — only the caller that actually flipped the row refunds, so a late-finishing task or a second instance can never double-credit. Rows predating `generation_cost` are failed but **not** refunded; settle those from `/admin/users/:id`.
 
 The service talks to Supabase through `SimpleSupabaseClient` (raw `httpx` REST with the service-role key).
 
@@ -111,7 +113,7 @@ If the Supabase project is gone or you're starting from scratch, **`supabase/boo
 Prefer a **single root `.env`** (see `.env.example`). Vite loads it via `envDir: '..'` in `suno-clone/vite.config.ts`.
 
 - **Frontend** — `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `VITE_GENERATE_API_URL`.
-- **Python service** — `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `GOOGLE_AI_API_KEY`, `CORS_ORIGINS`.
+- **Python service** — `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `GOOGLE_AI_API_KEY`, `CORS_ORIGINS`. Optional: `GENERATION_STUCK_AFTER_SECONDS` (default 1800 — must stay above the worst-case generation time of ~20 min), `GENERATION_REAPER_INTERVAL_SECONDS` (default 300), `ALLOW_DEGRADED_START` (default off — the service refuses to boot on incomplete config; set it to `1` to boot anyway and report `degraded` on `GET /` instead).
 - **Edge functions / payments** — plus `SITE_URL`, `STRIPE_*`, `LIQPAY_*`.
 - All `.env` files are git-ignored — **never commit secrets.** Copy from `.env.example`.
 

@@ -51,8 +51,17 @@ CREATE TABLE IF NOT EXISTS tracks (
     likes INTEGER DEFAULT 0,
     plays INTEGER DEFAULT 0,
     status TEXT DEFAULT 'pending',
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    -- Credits actually charged for this generation, so the stuck-track reaper
+    -- refunds the exact amount instead of guessing song (10) vs sample (4).
+    generation_cost INTEGER,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    -- Bumped by the tracks_set_updated_at trigger on every write: a row that
+    -- stops moving while pending/processing is provably abandoned.
+    updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+-- In case an older tracks table already exists without the lifecycle columns.
+ALTER TABLE tracks ADD COLUMN IF NOT EXISTS generation_cost INTEGER;
+ALTER TABLE tracks ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
 
 CREATE TABLE IF NOT EXISTS credit_transactions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -161,6 +170,25 @@ CREATE TABLE IF NOT EXISTS admin_actions (
 -- Every SECURITY DEFINER function pins search_path: without it a caller can
 -- shadow `profiles` / `plans` with a temp table and make the function operate
 -- on their own data (privilege escalation).
+
+-- Keeps tracks.updated_at honest for every writer (service role, admin panel,
+-- future features) — the stuck-track reaper depends on it.
+CREATE OR REPLACE FUNCTION set_updated_at()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+    NEW.updated_at := NOW();
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS tracks_set_updated_at ON tracks;
+CREATE TRIGGER tracks_set_updated_at
+    BEFORE UPDATE ON tracks
+    FOR EACH ROW
+    EXECUTE FUNCTION set_updated_at();
 
 CREATE OR REPLACE FUNCTION is_admin()
 RETURNS BOOLEAN
@@ -502,6 +530,10 @@ CREATE INDEX IF NOT EXISTS tracks_user_created_idx ON tracks (user_id, created_a
 CREATE INDEX IF NOT EXISTS tracks_status_idx ON tracks (status);
 -- /admin/tracks pagination and the dashboard's 14-day chart.
 CREATE INDEX IF NOT EXISTS tracks_created_idx ON tracks (created_at DESC);
+-- The only query the stuck-track reaper runs.
+CREATE INDEX IF NOT EXISTS tracks_in_flight_idx
+    ON tracks (updated_at)
+    WHERE status IN ('pending', 'processing');
 
 -- User transaction history + dashboard "credits spent" window.
 CREATE INDEX IF NOT EXISTS credit_transactions_user_created_idx
