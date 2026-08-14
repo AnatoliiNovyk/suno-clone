@@ -47,8 +47,10 @@ The service talks to Supabase through `SimpleSupabaseClient` (raw `httpx` REST w
 
 ### Backend (Supabase)
 
-- **Tables** (`supabase/tables/*.sql`): `profiles` (credits, plan, role), `tracks`, `credit_transactions`, `subscriptions` (provider-agnostic: `provider`, `currency`, `amount_minor`, `provider_*_id`), `plans` + `plan_prices` (single source of truth for plan credits and fixed per-currency prices in minor units), `payment_events` (webhook idempotency: UNIQUE per `provider`+`event_id`), plus legacy `suno_plans`/`suno_subscriptions` (vestigial). RLS via `supabase/migrations/` (merchant objects were later dropped by `1784064000_remove_merchants.sql`).
+- **Tables** (`supabase/tables/*.sql`): `profiles` (credits, plan, role), `tracks`, `credit_transactions`, `subscriptions` (provider-agnostic: `provider`, `currency`, `amount_minor`, `provider_*_id`), `plans` + `plan_prices` (single source of truth for plan credits and fixed per-currency prices in minor units), `payment_events` (webhook idempotency: UNIQUE per `provider`+`event_id`), plus legacy `suno_plans`/`suno_subscriptions` (vestigial). RLS via `supabase/migrations/` (merchant objects were later dropped by `1784064000_remove_merchants.sql`; the migrations that referenced them are guarded by `to_regclass()` so `supabase db push` runs from zero).
 - **Credit movement** — exactly two paths, both service-role only, both atomic and both writing a `credit_transactions` ledger row: `adjust_credits(p_user_id, p_delta, p_type, p_description)` for generation charges/refunds and manual top-ups, and `apply_plan_purchase(user, plan, provider, currency, amount_minor, interval, …)` for paid plans (sets the plan, **adds** `plans.monthly_credits` to the balance, upserts the subscription). Never read-modify-write `profiles.credits`, and never grant credits outside these two RPCs.
+- **Definer functions** — every `SECURITY DEFINER` function pins `SET search_path = public, pg_temp`; keep it that way when adding new ones.
+- **Column-level grants** — `profiles` (`display_name`, `avatar_url`) and `tracks` (`title`, `is_public`, `cover_url`) are the only columns `authenticated` may UPDATE. `status`/`audio_url`/`credits`/`plan`/`role`/`likes`/`plays` move only through the service role or a dedicated RPC.
 - **Storage**: public `audio` bucket. Demo assets at `samples/demo-{1..5}.mp3`; generated audio at `generated/{userId}/{trackId}.{ext}` (extension from Lyria 3's returned `mime_type`, e.g. `.wav`).
 - **Edge functions** (Deno, `supabase/functions/`): `create-payment` (JWT-authenticated provider-agnostic checkout), `payments-webhook` (signature-verified webhook for all providers), and legacy-compatible `generate-music` (thin JWT-forwarding proxy to Python).
 
@@ -102,7 +104,7 @@ supabase db push        # apply tables/ + migrations/
 
 ### Fresh Supabase project (bootstrap)
 
-If the Supabase project is gone or you're starting from scratch, **`supabase/bootstrap.sql`** recreates everything in one shot: paste it into Dashboard → SQL Editor and run. It is idempotent (safe to re-run) and creates all tables, the `is_admin()`/`adjust_credits()`/`apply_plan_purchase()`/`admin_*` functions, RLS policies, the public `audio` storage bucket, and seeds `plans`/`plan_prices`. Afterwards: update both `.env` files with the new project's URL/keys and deploy the edge functions (`create-payment`, `payments-webhook`).
+If the Supabase project is gone or you're starting from scratch, **`supabase/bootstrap.sql`** recreates everything in one shot: paste it into Dashboard → SQL Editor and run. It is idempotent (safe to re-run) and creates all tables, the `is_admin()`/`adjust_credits()`/`apply_plan_purchase()`/`admin_*` functions, RLS policies and column grants, indexes and foreign keys, the public `audio` storage bucket, and seeds `plans`/`plan_prices`. Afterwards: update both `.env` files with the new project's URL/keys and deploy the edge functions (`create-payment`, `payments-webhook`).
 
 ### Environment variables
 

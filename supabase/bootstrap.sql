@@ -7,10 +7,11 @@
 --
 -- It recreates everything the app needs:
 --   1. Tables (profiles, tracks, credits, subscriptions, plans, payment_events)
---   2. Functions (is_admin, adjust_credits, apply_plan_purchase)
---   3. Row Level Security policies
---   4. Storage buckets (audio — public)
---   5. Seed data (plans + fixed per-currency prices)
+--   2. Functions (is_admin, adjust_credits, apply_plan_purchase, admin_*)
+--   3. Row Level Security policies + column-level grants
+--   4. Indexes and foreign keys
+--   5. Storage buckets (audio — public)
+--   6. Seed data (plans + fixed per-currency prices)
 --
 -- After running it, point .env files at the new project:
 --   suno-clone/.env : VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY
@@ -157,11 +158,16 @@ CREATE TABLE IF NOT EXISTS admin_actions (
 -- 2. FUNCTIONS
 -- ============================================================
 
+-- Every SECURITY DEFINER function pins search_path: without it a caller can
+-- shadow `profiles` / `plans` with a temp table and make the function operate
+-- on their own data (privilege escalation).
+
 CREATE OR REPLACE FUNCTION is_admin()
 RETURNS BOOLEAN
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
+SET search_path = public, pg_temp
 AS $$
   SELECT EXISTS (SELECT 1 FROM profiles WHERE id = auth.uid() AND role = 'admin');
 $$;
@@ -305,6 +311,7 @@ CREATE OR REPLACE FUNCTION admin_adjust_credits(p_user_id UUID, p_delta INTEGER,
 RETURNS INTEGER
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = public, pg_temp
 AS $$
 DECLARE
     new_balance INTEGER;
@@ -342,6 +349,7 @@ CREATE OR REPLACE FUNCTION admin_set_plan(p_user_id UUID, p_plan TEXT)
 RETURNS VOID
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = public, pg_temp
 AS $$
 BEGIN
     IF NOT is_admin() THEN
@@ -365,6 +373,7 @@ CREATE OR REPLACE FUNCTION admin_set_role(p_user_id UUID, p_role TEXT)
 RETURNS VOID
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = public, pg_temp
 AS $$
 BEGIN
     IF NOT is_admin() THEN
@@ -429,7 +438,13 @@ GRANT  UPDATE (display_name, avatar_url) ON profiles TO authenticated;
 REVOKE INSERT ON profiles FROM anon, authenticated;
 GRANT  INSERT (id, email, display_name, avatar_url) ON profiles TO authenticated;
 
--- Tracks
+-- Tracks: the RLS policy only picks the row. Without column grants a user
+-- could set their own track to status='completed', point audio_url anywhere,
+-- or inflate likes/plays — generation columns move only through the service
+-- role (the Python service).
+REVOKE UPDATE ON tracks FROM anon, authenticated;
+GRANT  UPDATE (title, is_public, cover_url) ON tracks TO authenticated;
+
 DROP POLICY IF EXISTS "Users can view own tracks" ON tracks;
 CREATE POLICY "Users can view own tracks" ON tracks FOR SELECT USING (auth.uid() = user_id OR is_public = true);
 DROP POLICY IF EXISTS "Users can insert own tracks" ON tracks;
@@ -478,7 +493,87 @@ DROP POLICY IF EXISTS "payment_events_admin_select" ON payment_events;
 CREATE POLICY "payment_events_admin_select" ON payment_events FOR SELECT USING (is_admin());
 
 -- ============================================================
--- 4. STORAGE BUCKETS
+-- 4. INDEXES AND FOREIGN KEYS
+-- ============================================================
+
+-- LibraryPage: tracks of one user, newest first.
+CREATE INDEX IF NOT EXISTS tracks_user_created_idx ON tracks (user_id, created_at DESC);
+-- Status polling + /admin/tracks status filter + the stuck-track reaper.
+CREATE INDEX IF NOT EXISTS tracks_status_idx ON tracks (status);
+-- /admin/tracks pagination and the dashboard's 14-day chart.
+CREATE INDEX IF NOT EXISTS tracks_created_idx ON tracks (created_at DESC);
+
+-- User transaction history + dashboard "credits spent" window.
+CREATE INDEX IF NOT EXISTS credit_transactions_user_created_idx
+    ON credit_transactions (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS credit_transactions_created_idx
+    ON credit_transactions (created_at DESC);
+
+-- Subscription lookups: by owner, and by provider ref (renewals/cancellations).
+CREATE INDEX IF NOT EXISTS subscriptions_user_idx ON subscriptions (user_id);
+CREATE INDEX IF NOT EXISTS subscriptions_provider_ref_idx
+    ON subscriptions (provider, provider_subscription_id);
+
+-- Webhook legacy email fallback + admin user search.
+CREATE INDEX IF NOT EXISTS profiles_email_idx ON profiles (email);
+
+-- /admin/audit and payment-event listings.
+CREATE INDEX IF NOT EXISTS admin_actions_created_idx ON admin_actions (created_at DESC);
+CREATE INDEX IF NOT EXISTS payment_events_created_idx ON payment_events (created_at DESC);
+
+-- Foreign keys: without them, deleting an auth user left orphan profiles,
+-- tracks, transactions and subscriptions behind forever. Added NOT VALID so
+-- pre-existing orphans surface as a NOTICE instead of aborting the script;
+-- new rows are enforced immediately either way.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'profiles_id_fkey') THEN
+        ALTER TABLE profiles ADD CONSTRAINT profiles_id_fkey
+            FOREIGN KEY (id) REFERENCES auth.users (id) ON DELETE CASCADE NOT VALID;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'tracks_user_id_fkey') THEN
+        ALTER TABLE tracks ADD CONSTRAINT tracks_user_id_fkey
+            FOREIGN KEY (user_id) REFERENCES profiles (id) ON DELETE CASCADE NOT VALID;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'credit_transactions_user_id_fkey') THEN
+        ALTER TABLE credit_transactions ADD CONSTRAINT credit_transactions_user_id_fkey
+            FOREIGN KEY (user_id) REFERENCES profiles (id) ON DELETE CASCADE NOT VALID;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'subscriptions_user_id_fkey') THEN
+        ALTER TABLE subscriptions ADD CONSTRAINT subscriptions_user_id_fkey
+            FOREIGN KEY (user_id) REFERENCES profiles (id) ON DELETE CASCADE NOT VALID;
+    END IF;
+END $$;
+
+DO $$
+DECLARE
+    v_table TEXT;
+    v_constraint TEXT;
+BEGIN
+    FOREACH v_constraint IN ARRAY ARRAY[
+        'profiles_id_fkey',
+        'tracks_user_id_fkey',
+        'credit_transactions_user_id_fkey',
+        'subscriptions_user_id_fkey'
+    ] LOOP
+        v_table := CASE v_constraint
+            WHEN 'profiles_id_fkey' THEN 'profiles'
+            WHEN 'tracks_user_id_fkey' THEN 'tracks'
+            WHEN 'credit_transactions_user_id_fkey' THEN 'credit_transactions'
+            ELSE 'subscriptions'
+        END;
+        BEGIN
+            EXECUTE format('ALTER TABLE %I VALIDATE CONSTRAINT %I', v_table, v_constraint);
+        EXCEPTION WHEN others THEN
+            RAISE NOTICE
+                'Could not validate %.% — orphan rows present (%). The constraint still guards new rows.',
+                v_table, v_constraint, SQLERRM;
+        END;
+    END LOOP;
+END $$;
+
+-- ============================================================
+-- 5. STORAGE BUCKETS
 -- ============================================================
 
 -- Public bucket for generated music and demo samples.
@@ -496,7 +591,7 @@ CREATE POLICY "audio_public_read" ON storage.objects FOR SELECT
     USING (bucket_id = 'audio');
 
 -- ============================================================
--- 5. SEED DATA
+-- 6. SEED DATA
 -- ============================================================
 
 INSERT INTO plans (key, name, monthly_credits, active) VALUES
