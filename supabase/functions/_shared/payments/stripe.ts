@@ -73,11 +73,15 @@ export const stripeProvider: PaymentProvider = {
     }
 
     const event = JSON.parse(payload);
+    // Stripe's event id (evt_…) is stable across delivery retries — exactly
+    // what the webhook needs as an idempotency key.
+    const eventId = String(event.id ?? '');
     if (event.type === 'checkout.session.completed') {
       const session = event.data?.object ?? {};
       const metadata = session.metadata ?? {};
       return {
         type: 'payment_completed',
+        eventId,
         userId: metadata.user_id || undefined,
         email: session.customer_details?.email || session.customer_email || '',
         planKey: metadata.plan_key || metadata.plan_type || 'pro',
@@ -91,6 +95,7 @@ export const stripeProvider: PaymentProvider = {
     if (event.type === 'customer.subscription.deleted') {
       return {
         type: 'subscription_cancelled',
+        eventId,
         providerSubscriptionId: event.data?.object?.id || '',
       };
     }

@@ -6,8 +6,8 @@
 -- CREATE OR REPLACE / DROP POLICY IF EXISTS / ON CONFLICT DO NOTHING).
 --
 -- It recreates everything the app needs:
---   1. Tables (profiles, tracks, credits, subscriptions, plans)
---   2. Functions (is_admin, adjust_credits)
+--   1. Tables (profiles, tracks, credits, subscriptions, plans, payment_events)
+--   2. Functions (is_admin, adjust_credits, apply_plan_purchase)
 --   3. Row Level Security policies
 --   4. Storage buckets (audio — public)
 --   5. Seed data (plans + fixed per-currency prices)
@@ -130,6 +130,18 @@ CREATE TABLE IF NOT EXISTS plan_prices (
     UNIQUE (plan_key, currency, "interval")
 );
 
+-- Webhook idempotency ledger: one row per provider event, claimed before the
+-- event is processed so a provider retry can never grant credits twice.
+CREATE TABLE IF NOT EXISTS payment_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    provider TEXT NOT NULL,             -- 'stripe' | 'liqpay' | ...
+    event_id TEXT NOT NULL,             -- the provider's own event/payment id
+    event_type TEXT,
+    user_id UUID,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (provider, event_id)
+);
+
 -- Audit log of privileged admin-panel actions (written only by the
 -- SECURITY DEFINER admin_* functions).
 CREATE TABLE IF NOT EXISTS admin_actions (
@@ -154,11 +166,20 @@ AS $$
   SELECT EXISTS (SELECT 1 FROM profiles WHERE id = auth.uid() AND role = 'admin');
 $$;
 
--- Atomic credit adjustment (service-role only): eliminates read-modify-write races.
-CREATE OR REPLACE FUNCTION adjust_credits(p_user_id UUID, p_delta INTEGER)
+-- Atomic credit adjustment (service-role only): eliminates read-modify-write
+-- races and records every movement in credit_transactions.
+DROP FUNCTION IF EXISTS adjust_credits(UUID, INTEGER);
+
+CREATE OR REPLACE FUNCTION adjust_credits(
+    p_user_id UUID,
+    p_delta INTEGER,
+    p_type TEXT DEFAULT 'adjustment',
+    p_description TEXT DEFAULT NULL
+)
 RETURNS INTEGER
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = public, pg_temp
 AS $$
 DECLARE
     new_balance INTEGER;
@@ -174,13 +195,109 @@ BEGIN
         RAISE EXCEPTION 'insufficient_credits';
     END IF;
 
+    INSERT INTO credit_transactions (user_id, amount, type, description)
+    VALUES (
+        p_user_id,
+        p_delta,
+        COALESCE(NULLIF(btrim(p_type), ''), 'adjustment'),
+        NULLIF(btrim(COALESCE(p_description, '')), '')
+    );
+
     RETURN new_balance;
 END;
 $$;
 
-REVOKE ALL ON FUNCTION adjust_credits(UUID, INTEGER) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION adjust_credits(UUID, INTEGER, TEXT, TEXT) FROM PUBLIC, anon, authenticated;
 -- The service role (Python service, webhooks) must still be able to call it.
-GRANT EXECUTE ON FUNCTION adjust_credits(UUID, INTEGER) TO service_role;
+GRANT EXECUTE ON FUNCTION adjust_credits(UUID, INTEGER, TEXT, TEXT) TO service_role;
+
+-- The only way a paid plan is granted: sets the plan, ADDS the plan's monthly
+-- credits to the existing balance (never overwrites it), logs the ledger row
+-- and upserts the subscription — all in one transaction. Credits always come
+-- from plans.monthly_credits, never from the caller.
+CREATE OR REPLACE FUNCTION apply_plan_purchase(
+    p_user_id UUID,
+    p_plan TEXT,
+    p_provider TEXT,
+    p_currency TEXT,
+    p_amount_minor INTEGER,
+    p_interval TEXT,
+    p_provider_customer_id TEXT DEFAULT NULL,
+    p_provider_subscription_id TEXT DEFAULT NULL
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+    v_credits INTEGER;
+    v_balance INTEGER;
+    v_updated BOOLEAN := FALSE;
+BEGIN
+    SELECT monthly_credits INTO v_credits FROM plans WHERE key = p_plan;
+    IF v_credits IS NULL THEN
+        RAISE EXCEPTION 'unknown_plan';
+    END IF;
+
+    UPDATE profiles
+    SET plan = p_plan,
+        credits = COALESCE(credits, 0) + v_credits,
+        updated_at = NOW()
+    WHERE id = p_user_id
+    RETURNING credits INTO v_balance;
+
+    IF v_balance IS NULL THEN
+        RAISE EXCEPTION 'user_not_found';
+    END IF;
+
+    INSERT INTO credit_transactions (user_id, amount, type, description)
+    VALUES (
+        p_user_id,
+        v_credits,
+        'plan_purchase',
+        format(
+            '%s plan via %s (%s %s / %s)',
+            p_plan, p_provider,
+            to_char(COALESCE(p_amount_minor, 0)::NUMERIC / 100, 'FM999999990.00'),
+            p_currency, p_interval
+        )
+    );
+
+    -- A renewal reuses the provider's subscription id: refresh that row
+    -- instead of piling up duplicates.
+    IF p_provider_subscription_id IS NOT NULL AND btrim(p_provider_subscription_id) <> '' THEN
+        UPDATE subscriptions
+        SET plan = p_plan,
+            currency = p_currency,
+            amount_minor = p_amount_minor,
+            "interval" = p_interval,
+            provider_customer_id = COALESCE(p_provider_customer_id, provider_customer_id),
+            status = 'active'
+        WHERE provider = p_provider
+          AND provider_subscription_id = p_provider_subscription_id;
+        v_updated := FOUND;
+    END IF;
+
+    IF NOT v_updated THEN
+        INSERT INTO subscriptions (
+            user_id, plan, provider, currency, amount_minor, "interval",
+            provider_customer_id, provider_subscription_id, status
+        )
+        VALUES (
+            p_user_id, p_plan, p_provider, p_currency, p_amount_minor, p_interval,
+            p_provider_customer_id, p_provider_subscription_id, 'active'
+        );
+    END IF;
+
+    RETURN jsonb_build_object('credits_granted', v_credits, 'new_balance', v_balance);
+END;
+$$;
+
+REVOKE ALL ON FUNCTION apply_plan_purchase(UUID, TEXT, TEXT, TEXT, INTEGER, TEXT, TEXT, TEXT)
+    FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION apply_plan_purchase(UUID, TEXT, TEXT, TEXT, INTEGER, TEXT, TEXT, TEXT)
+    TO service_role;
 
 -- --- Admin-panel RPCs: SECURITY DEFINER + internal is_admin() check. ---
 
@@ -290,6 +407,7 @@ ALTER TABLE credit_transactions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE plans ENABLE ROW LEVEL SECURITY;
 ALTER TABLE plan_prices ENABLE ROW LEVEL SECURITY;
 ALTER TABLE admin_actions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE payment_events ENABLE ROW LEVEL SECURITY;
 -- Legacy tables: RLS on with no policies = service-role only (never anon).
 ALTER TABLE suno_plans ENABLE ROW LEVEL SECURITY;
 ALTER TABLE suno_subscriptions ENABLE ROW LEVEL SECURITY;
@@ -354,6 +472,10 @@ DROP POLICY IF EXISTS "plan_prices_admin_write" ON plan_prices;
 CREATE POLICY "plan_prices_admin_write" ON plan_prices FOR ALL USING (is_admin()) WITH CHECK (is_admin());
 DROP POLICY IF EXISTS "admin_actions_admin_select" ON admin_actions;
 CREATE POLICY "admin_actions_admin_select" ON admin_actions FOR SELECT USING (is_admin());
+
+-- Payment events are written only by the service role (the webhook).
+DROP POLICY IF EXISTS "payment_events_admin_select" ON payment_events;
+CREATE POLICY "payment_events_admin_select" ON payment_events FOR SELECT USING (is_admin());
 
 -- ============================================================
 -- 4. STORAGE BUCKETS

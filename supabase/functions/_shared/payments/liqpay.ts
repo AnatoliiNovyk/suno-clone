@@ -98,9 +98,17 @@ export const liqpayProvider: PaymentProvider = {
     const completedStatuses = ['success', 'subscribed', 'active', 'sandbox'];
     const cancelledStatuses = ['unsubscribed', 'canceled', 'cancelled'];
 
+    // LiqPay has no event id: payment_id is unique per charge (including each
+    // subscription renewal), so it is the idempotency key. order_id + status is
+    // the fallback for callbacks that carry no payment_id.
+    const eventId = callback.payment_id
+      ? `payment:${callback.payment_id}`
+      : `order:${String(callback.order_id ?? '')}:${status}`;
+
     if (completedStatuses.includes(status)) {
       return {
         type: 'payment_completed',
+        eventId,
         userId: info.user_id ? String(info.user_id) : undefined,
         email: String(info.email ?? callback.sender_email ?? ''),
         planKey: String(info.plan_key ?? 'pro'),
@@ -114,6 +122,7 @@ export const liqpayProvider: PaymentProvider = {
     if (cancelledStatuses.includes(status)) {
       return {
         type: 'subscription_cancelled',
+        eventId,
         providerSubscriptionId: String(callback.order_id ?? ''),
       };
     }

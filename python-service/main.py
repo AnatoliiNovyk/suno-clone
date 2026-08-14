@@ -136,8 +136,12 @@ class SimpleSupabaseClient:
                 resp.raise_for_status()
             return resp
 
-    async def adjust_credits(self, user_id, delta):
+    async def adjust_credits(self, user_id, delta, tx_type="adjustment", description=None):
         """Atomically adjust the user's credits via the adjust_credits RPC.
+
+        The RPC also writes a credit_transactions row from tx_type/description,
+        which is what the admin dashboard and the user's history read — never
+        move credits by any other path.
 
         Returns the new balance. Raises InsufficientCreditsError when the
         adjustment would drive the balance below zero.
@@ -146,7 +150,12 @@ class SimpleSupabaseClient:
             resp = await client.post(
                 f"{self.url}/rest/v1/rpc/adjust_credits",
                 headers=self.headers,
-                json={"p_user_id": user_id, "p_delta": delta},
+                json={
+                    "p_user_id": user_id,
+                    "p_delta": delta,
+                    "p_type": tx_type,
+                    "p_description": description,
+                },
             )
             if resp.status_code == 400 and "insufficient_credits" in resp.text:
                 raise InsufficientCreditsError()
@@ -502,7 +511,12 @@ async def generate_music_task(
             except Exception:
                 print(f"[Error] Failed to mark track {track_id} as failed: {traceback.format_exc()}")
             try:
-                await supabase_client.adjust_credits(user_id, cost)
+                await supabase_client.adjust_credits(
+                    user_id,
+                    cost,
+                    tx_type="refund",
+                    description=f"refund for failed generation (track {track_id})",
+                )
             except Exception:
                 print(
                     f"[CRITICAL] Refund of {cost} credits FAILED for user {user_id} "
@@ -530,15 +544,23 @@ async def generate_music_endpoint(
         raise HTTPException(status_code=400, detail="mode must be 'song' or 'sample'")
     cost = GENERATION_COST[mode]
 
+    # The track id is minted before the charge so the ledger row can name the
+    # track it paid for.
+    track_id = str(uuid.uuid4())
+
     try:
-        credits_remaining = await supabase_client.adjust_credits(user_id, -cost)
+        credits_remaining = await supabase_client.adjust_credits(
+            user_id,
+            -cost,
+            tx_type="generation",
+            description=f"{mode} generation via {MODEL_BY_MODE[mode]} (track {track_id})",
+        )
     except InsufficientCreditsError:
         raise HTTPException(status_code=402, detail="Insufficient credits")
     except Exception as e:
         print(f"Error deducting credits: {e}")
         raise HTTPException(status_code=500, detail="Failed to deduct credits")
 
-    track_id = str(uuid.uuid4())
     prompt = (request.prompt or "").strip()
     genre = (request.genre or "pop").strip() or "pop"
     title = (request.title or "").strip()[:100]
@@ -559,7 +581,12 @@ async def generate_music_endpoint(
     except Exception as e:
         print(f"Error creating track: {e}")
         try:
-            await supabase_client.adjust_credits(user_id, cost)
+            await supabase_client.adjust_credits(
+                user_id,
+                cost,
+                tx_type="refund",
+                description=f"refund — track record could not be created ({track_id})",
+            )
         except Exception:
             print(
                 f"[CRITICAL] Refund failed for user {user_id} after track-create error: "

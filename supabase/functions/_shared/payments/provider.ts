@@ -26,6 +26,9 @@ export interface CheckoutResult {
 export type WebhookEvent =
   | {
       type: 'payment_completed';
+      /** The provider's own event/payment id — the webhook's idempotency key.
+       *  MUST be unique per delivered event and stable across provider retries. */
+      eventId: string;
       userId?: string;
       email?: string;
       planKey: string;
@@ -35,7 +38,7 @@ export type WebhookEvent =
       providerCustomerId?: string;
       providerSubscriptionId?: string;
     }
-  | { type: 'subscription_cancelled'; providerSubscriptionId: string }
+  | { type: 'subscription_cancelled'; eventId: string; providerSubscriptionId: string }
   | { type: 'ignored'; reason: string };
 
 export interface PaymentProvider {
