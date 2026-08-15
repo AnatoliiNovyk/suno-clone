@@ -39,7 +39,16 @@ export function LibraryPage() {
       setCurrentTrack((prev) => {
         if (!prev) return prev;
         const updated = (data as Track[]).find((t) => t.id === prev.id);
-        return updated ?? prev;
+        if (!updated) return prev;
+        // Keep the previous object unless something the player actually reads
+        // changed: every poll returns a fresh object, and swapping it on each
+        // tick re-rendered the player for nothing.
+        const unchanged =
+          updated.status === prev.status &&
+          updated.audio_url === prev.audio_url &&
+          updated.title === prev.title &&
+          updated.cover_url === prev.cover_url;
+        return unchanged ? prev : updated;
       });
     }
     setLoading(false);
@@ -79,6 +88,19 @@ export function LibraryPage() {
   const handlePlay = (track: Track) => {
     setCurrentTrack(track);
   };
+
+  // Skip walks the tracks the player can actually play, in the order shown.
+  const playableTracks = filteredTracks.filter(
+    (t) => t.status === 'completed' && Boolean(t.audio_url),
+  );
+  const currentIndex = currentTrack
+    ? playableTracks.findIndex((t) => t.id === currentTrack.id)
+    : -1;
+  const previousTrack = currentIndex > 0 ? playableTracks[currentIndex - 1] : undefined;
+  const nextTrack =
+    currentIndex >= 0 && currentIndex < playableTracks.length - 1
+      ? playableTracks[currentIndex + 1]
+      : undefined;
 
   if (!user) {
     return (
@@ -173,7 +195,12 @@ export function LibraryPage() {
       </div>
 
       {currentTrack && (
-        <AudioPlayer track={currentTrack} onClose={() => setCurrentTrack(null)} />
+        <AudioPlayer
+          track={currentTrack}
+          onClose={() => setCurrentTrack(null)}
+          onPrevious={previousTrack ? () => setCurrentTrack(previousTrack) : undefined}
+          onNext={nextTrack ? () => setCurrentTrack(nextTrack) : undefined}
+        />
       )}
     </div>
   );

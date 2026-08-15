@@ -5,6 +5,17 @@ export type ExportFormat = 'mp3' | 'wav';
 
 const MP3_KBPS = 192;
 const MP3_BLOCK_SIZE = 1152;
+// Encoding a 3-minute track is ~7700 blocks. Doing them in one synchronous run
+// froze the tab for seconds — including the spinner that says an export is in
+// progress. Yield to the browser every so often instead. (A Web Worker would
+// remove the cost entirely; this keeps the UI answering for a fraction of the
+// complexity.)
+const MP3_BLOCKS_PER_YIELD = 256;
+// Revoking an object URL in the same tick as the click aborts the download in
+// Firefox and Safari. Hold it long enough for the browser to take ownership.
+const BLOB_URL_TTL_MS = 40_000;
+
+const yieldToBrowser = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 function sanitizeFileName(name: string): string {
   const cleaned = name.trim().replace(/[\\/:*?"<>|]+/g, '').replace(/\s+/g, ' ');
@@ -65,7 +76,7 @@ function encodeWav(buffer: AudioBuffer): Blob {
   return new Blob([arrayBuffer], { type: 'audio/wav' });
 }
 
-function encodeMp3(buffer: AudioBuffer): Blob {
+async function encodeMp3(buffer: AudioBuffer): Promise<Blob> {
   const numChannels = Math.min(buffer.numberOfChannels, 2);
   const encoder = new Mp3Encoder(numChannels, buffer.sampleRate, MP3_KBPS);
 
@@ -73,11 +84,13 @@ function encodeMp3(buffer: AudioBuffer): Blob {
   const right = numChannels === 2 ? floatTo16BitPcm(buffer.getChannelData(1)) : undefined;
 
   const chunks: Uint8Array[] = [];
+  let blocks = 0;
   for (let i = 0; i < left.length; i += MP3_BLOCK_SIZE) {
     const leftChunk = left.subarray(i, i + MP3_BLOCK_SIZE);
     const rightChunk = right?.subarray(i, i + MP3_BLOCK_SIZE);
     const encoded = encoder.encodeBuffer(leftChunk, rightChunk);
     if (encoded.length > 0) chunks.push(encoded);
+    if (++blocks % MP3_BLOCKS_PER_YIELD === 0) await yieldToBrowser();
   }
   const tail = encoder.flush();
   if (tail.length > 0) chunks.push(tail);
@@ -93,7 +106,7 @@ function triggerDownload(blob: Blob, fileName: string) {
   document.body.appendChild(a);
   a.click();
   a.remove();
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), BLOB_URL_TTL_MS);
 }
 
 function sourceExtension(audioUrl: string): string {
@@ -124,7 +137,7 @@ export async function exportTrack(track: Track, format: ExportFormat): Promise<v
   const audioCtx = new AudioContext();
   try {
     const decoded = await audioCtx.decodeAudioData(sourceBytes);
-    const blob = format === 'wav' ? encodeWav(decoded) : encodeMp3(decoded);
+    const blob = format === 'wav' ? encodeWav(decoded) : await encodeMp3(decoded);
     triggerDownload(blob, fileName);
   } finally {
     void audioCtx.close();
