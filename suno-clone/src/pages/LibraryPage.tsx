@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Search, Music } from 'lucide-react';
+import { Search, Music, Loader2 } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
 import { supabase } from '../lib/supabase';
 import { TrackCard } from '../components/ui/TrackCard';
@@ -9,7 +9,7 @@ import type { Track } from '../types';
 
 export function LibraryPage() {
   const navigate = useNavigate();
-  const { user } = useAuth();
+  const { user, loading: authLoading, error: authError, refreshUser } = useAuth();
 
   const [tracks, setTracks] = useState<Track[]>([]);
   const [loading, setLoading] = useState(true);
@@ -102,23 +102,35 @@ export function LibraryPage() {
       ? playableTracks[currentIndex + 1]
       : undefined;
 
+  // Until auth resolves we do not know whether there is a session — showing
+  // "log in" first made a signed-in user's own library flash as empty.
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-neutral-900 pt-24 flex items-center justify-center">
+        <Loader2 className="w-8 h-8 text-primary-500 animate-spin" />
+      </div>
+    );
+  }
+
   if (!user) {
     return (
       <div className="min-h-screen bg-neutral-900 pt-24 flex items-center justify-center">
         <div className="text-center">
           <Music className="w-16 h-16 text-neutral-500 mx-auto mb-4" />
           <h2 className="text-xl font-semibold text-neutral-50 mb-2">
-            Увійдіть, щоб побачити бібліотеку
+            {authError ?? 'Увійдіть, щоб побачити бібліотеку'}
           </h2>
           <p className="text-neutral-100 mb-6">
-            Ваші створені треки будуть зберігатися тут
+            {authError
+              ? 'Сесія активна, але профіль не завантажився.'
+              : 'Ваші створені треки будуть зберігатися тут'}
           </p>
           <button
             type="button"
-            onClick={() => navigate('/login')}
+            onClick={() => (authError ? refreshUser() : navigate('/login'))}
             className="px-6 py-3 rounded-full bg-primary-500 text-white font-medium hover:bg-primary-700 transition-colors"
           >
-            Увійти
+            {authError ? 'Спробувати ще' : 'Увійти'}
           </button>
         </div>
       </div>

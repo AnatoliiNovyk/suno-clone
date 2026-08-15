@@ -9,7 +9,7 @@ import type { Track } from '../types';
 export function CreatePage() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
-  const { user, refreshUser } = useAuth();
+  const { user, loading: authLoading, refreshUser } = useAuth();
 
   const [prompt, setPrompt] = useState(searchParams.get('prompt') || '');
   const [title, setTitle] = useState('');
@@ -163,7 +163,9 @@ export function CreatePage() {
           <button
             type="button"
             onClick={handleGenerate}
-            disabled={isGenerating || !prompt.trim()}
+            // Until auth resolves, `user` is null and the click would bounce a
+            // signed-in visitor to the login page.
+            disabled={isGenerating || authLoading || !prompt.trim()}
             className="w-full flex items-center justify-center gap-2 px-6 py-4 rounded-full bg-gradient-to-r from-[#FF6B35] via-primary-500 to-primary-700 text-white font-semibold shadow-glow-orange hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
           >
             {isGenerating ? (

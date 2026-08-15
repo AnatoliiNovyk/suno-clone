@@ -15,7 +15,7 @@ const moods = ['Happy', 'Sad', 'Energetic', 'Calm', 'Dark', 'Uplifting', 'Romant
 
 export function AdvancedPage() {
   const navigate = useNavigate();
-  const { user, refreshUser } = useAuth();
+  const { user, loading: authLoading, refreshUser } = useAuth();
 
   const [mode, setMode] = useState<'song' | 'sample'>('song');
   const [prompt, setPrompt] = useState('');
@@ -479,7 +479,9 @@ export function AdvancedPage() {
           <div className="max-w-2xl mx-auto">
             <button
               onClick={handleGenerate}
-              disabled={isGenerating || !seedValid}
+              // Until auth resolves, `user` is null and the click would bounce
+              // a signed-in visitor to the login page.
+              disabled={isGenerating || authLoading || !seedValid}
               className="w-full flex items-center justify-center gap-2 px-6 py-4 rounded-full bg-gradient-to-r from-[#FF6B35] via-primary-500 to-primary-700 text-white font-semibold shadow-glow-orange hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
             >
               {isGenerating ? (

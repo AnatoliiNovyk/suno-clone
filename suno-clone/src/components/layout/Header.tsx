@@ -119,8 +119,51 @@ export function Header() {
                 {link.label}
               </Link>
             ))}
-            {!user && (
+            {/* Signed-in mobile users previously had no way to reach the
+                profile or sign out at all — this branch simply did not exist. */}
+            {user ? (
               <>
+                <div className="mt-2 pt-2 border-t border-white/10" />
+                <div className="flex items-center gap-2 px-4 py-2 text-sm text-neutral-100">
+                  <Sparkles className="w-4 h-4 text-primary-500" />
+                  {user.credits} кредитів
+                </div>
+                <Link
+                  to="/profile"
+                  onClick={() => setMobileMenuOpen(false)}
+                  className="flex items-center gap-2 px-4 py-3 rounded-md text-sm font-medium text-neutral-100 hover:bg-neutral-700/80"
+                >
+                  <User className="w-4 h-4" />
+                  Профіль
+                </Link>
+                <Link
+                  to="/pricing"
+                  onClick={() => setMobileMenuOpen(false)}
+                  className="px-4 py-3 rounded-md text-sm font-medium text-neutral-100 hover:bg-neutral-700/80"
+                >
+                  Тарифи
+                </Link>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMobileMenuOpen(false);
+                    void signOut();
+                  }}
+                  className="flex items-center gap-2 px-4 py-3 rounded-md text-sm font-medium text-left text-error hover:bg-error/10"
+                >
+                  <LogOut className="w-4 h-4" />
+                  Вийти
+                </button>
+              </>
+            ) : (
+              <>
+                <Link
+                  to="/pricing"
+                  onClick={() => setMobileMenuOpen(false)}
+                  className="px-4 py-3 rounded-md text-sm font-medium text-neutral-100 hover:bg-neutral-700/80"
+                >
+                  Тарифи
+                </Link>
                 <Link
                   to="/login"
                   onClick={() => setMobileMenuOpen(false)}

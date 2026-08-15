@@ -32,8 +32,14 @@ export function SignupPage() {
     setLoading(true);
 
     try {
-      await signUp(email, password);
-      setSuccess(true);
+      const { needsEmailConfirmation } = await signUp(email, password);
+      if (needsEmailConfirmation) {
+        setSuccess(true);
+      } else {
+        // Confirmation is off: Supabase already returned a session, so the user
+        // is signed in. Sending them to the login screen made no sense.
+        navigate('/create');
+      }
     } catch (err: any) {
       setError(err.message || 'Помилка реєстрації');
     } finally {

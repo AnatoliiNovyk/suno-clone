@@ -1,17 +1,18 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { User, CreditCard, LogOut, Check, Sparkles } from 'lucide-react';
+import { User, CreditCard, LogOut, Check, Sparkles, Loader2 } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
 import { supabase } from '../lib/supabase';
 
 export function ProfilePage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const { user, signOut, refreshUser } = useAuth();
-  
+  const { user, loading, error: authError, signOut, refreshUser } = useAuth();
+
   const [activeTab, setActiveTab] = useState<'account' | 'subscription'>('account');
-  const [displayName, setDisplayName] = useState(user?.display_name || '');
+  const [displayName, setDisplayName] = useState('');
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
   const [success, setSuccess] = useState(searchParams.get('success') === 'true');
 
   useEffect(() => {
@@ -21,16 +22,32 @@ export function ProfilePage() {
     }
   }, [success]);
 
+  // The profile arrives after the first render, so seeding this from useState
+  // left the field permanently empty for anyone who loaded the page directly.
+  useEffect(() => {
+    setDisplayName(user?.display_name ?? '');
+  }, [user?.display_name]);
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-neutral-900 pt-24 flex items-center justify-center">
+        <Loader2 className="w-8 h-8 text-primary-500 animate-spin" />
+      </div>
+    );
+  }
+
   if (!user) {
     return (
       <div className="min-h-screen bg-neutral-900 pt-24 flex items-center justify-center">
         <div className="text-center">
-          <p className="text-neutral-100 mb-4">Увійдіть для доступу до профілю</p>
+          <p className="text-neutral-100 mb-4">
+            {authError ?? 'Увійдіть для доступу до профілю'}
+          </p>
           <button
-            onClick={() => navigate('/login')}
+            onClick={() => (authError ? refreshUser() : navigate('/login'))}
             className="px-6 py-3 rounded-full bg-primary-500 text-white font-medium"
           >
-            Увійти
+            {authError ? 'Спробувати ще' : 'Увійти'}
           </button>
         </div>
       </div>
@@ -39,12 +56,18 @@ export function ProfilePage() {
 
   const handleSaveProfile = async () => {
     setSaving(true);
+    setSaveError('');
     const { error } = await supabase
       .from('profiles')
       .update({ display_name: displayName })
       .eq('id', user.id);
 
-    if (!error) {
+    if (error) {
+      // Silently swallowing this used to leave the page looking unchanged with
+      // no hint that the write had been refused.
+      console.error('Profile update failed:', error);
+      setSaveError(error.message || 'Не вдалося зберегти зміни.');
+    } else {
       await refreshUser();
       setSuccess(true);
     }
@@ -149,6 +172,8 @@ export function ProfilePage() {
                       className="w-full bg-neutral-700 border border-neutral-500 rounded-xl px-4 py-3 text-neutral-50 focus:outline-none focus:border-primary-500"
                     />
                   </div>
+
+                  {saveError && <p className="text-sm text-error">{saveError}</p>}
 
                   <button
                     onClick={handleSaveProfile}
