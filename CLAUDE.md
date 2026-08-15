@@ -116,8 +116,8 @@ Prefer a **single root `.env`** (see `.env.example`). Vite loads it via `envDir:
 
 - **Frontend** — `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `VITE_GENERATE_API_URL`.
 - **Python service** — `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `GOOGLE_AI_API_KEY`, `CORS_ORIGINS`. Optional: `GENERATION_STUCK_AFTER_SECONDS` (default 1800 — must stay above the worst-case generation time of ~20 min), `GENERATION_REAPER_INTERVAL_SECONDS` (default 300), `ALLOW_DEGRADED_START` (default off — the service refuses to boot on incomplete config; set it to `1` to boot anyway and report `degraded` on `GET /` instead).
-- **Edge functions / payments** — plus `SITE_URL`, `STRIPE_*`, `LIQPAY_*`.
-- All `.env` files are git-ignored — **never commit secrets.** Copy from `.env.example`.
+- **Edge functions / payments** — plus `SITE_URL`, `PYTHON_SERVICE_URL` (legacy proxy only), `STRIPE_*`, `LIQPAY_*`. `LIQPAY_ALLOW_SANDBOX` is off by default: a LiqPay `sandbox` callback is a *test* payment that moves no money, so it grants nothing unless explicitly opted into.
+- All `.env` files are git-ignored — **never commit secrets.** `.env.example` is the one tracked exception (`!.env.example` in `.gitignore`); keep it in sync when adding a variable.
 
 ## Conventions
 
@@ -126,7 +126,8 @@ Prefer a **single root `.env`** (see `.env.example`). Vite loads it via `envDir:
 - **Single-row queries** — use `.maybeSingle()`.
 - **Loading states** — boolean state + spinning Lucide icon (`<Loader2 className="animate-spin" />`).
 - **Credits** — 10 credits per full song, 4 per sample (Lyria 3 Clip); 50 on signup (a one-off grant — there is no refill job for free accounts). Plans: `free` / `pro` / `premier`, with their credit amounts read from `plans.monthly_credits`, never hardcoded in a page.
-- **TypeScript** — keep shared shapes in `src/types/index.ts`; use the `@/` import alias.
+- **TypeScript** — keep shared shapes in `src/types/index.ts`; use the `@/` import alias. `no-unused-vars` and `no-explicit-any` are lint **errors**: prefix a deliberately unused binding with `_`, and reach for `unknown` + `errorMessage()` (`src/lib/errors.ts`) in `catch` blocks rather than `any`. `react-hooks/set-state-in-effect` and `react-hooks/immutability` stay off on purpose — see the comment in `eslint.config.js` before re-enabling.
+- **User input in PostgREST filters** — never interpolate it raw into `.or(...)`; use `likePattern()` / `stripLikeWildcards()` from `src/lib/search.ts`. An unescaped `)` in a search box otherwise terminates the filter expression early.
 
 ## Known Gaps / Caveats
 

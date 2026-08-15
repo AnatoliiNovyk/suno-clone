@@ -1,5 +1,11 @@
-fastapi
-uvicorn
-google-genai>=2.10.0
-python-dotenv
-httpx
+# Pinned to the versions this service is tested against. Unpinned entries meant
+# `pip install -r` could silently pull a breaking release — google-genai in
+# particular is a preview SDK whose interactions API is still moving.
+#
+# To refresh: upgrade deliberately, verify generation end to end, then
+#   pip freeze | grep -iE '^(fastapi|uvicorn|google-genai|python-dotenv|httpx)='
+fastapi==0.140.0
+uvicorn==0.51.0
+google-genai==2.14.0
+python-dotenv==1.2.2
+httpx==0.28.1

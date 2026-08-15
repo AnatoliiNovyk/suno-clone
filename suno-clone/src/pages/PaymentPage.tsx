@@ -3,6 +3,7 @@ import { useSearchParams, useNavigate } from 'react-router-dom';
 import { Lock, Check, ArrowLeft, Loader2, ExternalLink } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
 import { supabase } from '../lib/supabase';
+import { errorMessage } from '../lib/errors';
 import {
   creditsForInterval,
   fetchPlanPrices,
@@ -116,9 +117,9 @@ export function PaymentPage() {
       } else {
         throw new Error('Не вдалося створити сесію оплати');
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Payment error:', err);
-      setError(err.message || 'Помилка обробки платежу. Спробуйте пізніше.');
+      setError(errorMessage(err, 'Помилка обробки платежу. Спробуйте пізніше.'));
       setProcessing(false);
     }
   };

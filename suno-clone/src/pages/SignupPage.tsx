@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Mail, Lock, Eye, EyeOff, Loader2, Check } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
+import { errorMessage } from '../lib/errors';
 
 export function SignupPage() {
   const navigate = useNavigate();
@@ -40,8 +41,8 @@ export function SignupPage() {
         // is signed in. Sending them to the login screen made no sense.
         navigate('/create');
       }
-    } catch (err: any) {
-      setError(err.message || 'Помилка реєстрації');
+    } catch (err: unknown) {
+      setError(errorMessage(err, 'Помилка реєстрації'));
     } finally {
       setLoading(false);
     }

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Loader2, Search, Play, Eye, EyeOff, Trash2 } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { deleteTrackAsAdmin } from '../../lib/adminApi';
+import { stripLikeWildcards } from '../../lib/search';
 import { rpcErrorMessage } from '../../lib/adminErrors';
 import { AudioPlayer } from '../../components/audio/AudioPlayer';
 import { AdminActionDialog } from '../../components/admin/AdminActionDialog';
@@ -68,7 +69,9 @@ export function AdminTracksPage() {
     if (status !== 'all') query = query.eq('status', status);
     if (visibility !== 'all') query = query.eq('is_public', visibility === 'public');
     if (debouncedSearch.trim()) {
-      query = query.ilike('title', `%${debouncedSearch.trim().replace(/[%,]/g, '')}%`);
+      // .ilike() encodes the value itself, but LIKE wildcards typed by the user
+      // would still be treated as wildcards rather than literals.
+      query = query.ilike('title', `%${stripLikeWildcards(debouncedSearch.trim())}%`);
     }
 
     return query.then(({ data, count, error: e }) => {

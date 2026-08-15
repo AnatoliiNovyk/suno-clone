@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Loader2, Search } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
+import { likePattern } from '../../lib/search';
 
 interface ProfileRow {
   id: string;
@@ -64,8 +65,10 @@ export function AdminUsersPage() {
     if (plan !== 'all') query = query.eq('plan', plan);
     if (role !== 'all') query = query.eq('role', role);
     if (debouncedSearch.trim()) {
-      const q = debouncedSearch.trim().replace(/[%,]/g, '');
-      query = query.or(`email.ilike.%${q}%,display_name.ilike.%${q}%`);
+      // Quoted, not merely stripped: `or=(...)` is parsed as structured text,
+      // so an unescaped `)` in the search box used to break out of the filter.
+      const pattern = likePattern(debouncedSearch);
+      query = query.or(`email.ilike.${pattern},display_name.ilike.${pattern}`);
     }
 
     query.then(({ data, count, error: e }) => {

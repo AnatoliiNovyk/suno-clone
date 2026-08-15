@@ -95,8 +95,24 @@ export const liqpayProvider: PaymentProvider = {
     }
 
     const status = String(callback.status ?? '');
-    const completedStatuses = ['success', 'subscribed', 'active', 'sandbox'];
+    // 'sandbox' means LiqPay accepted a TEST payment — no money moved. Granting
+    // credits for it in production would hand out paid plans for free the
+    // moment sandbox mode is enabled on the account, so it counts only when
+    // explicitly opted into.
+    const allowSandbox = ['1', 'true', 'yes'].includes(
+      (Deno.env.get('LIQPAY_ALLOW_SANDBOX') ?? '').trim().toLowerCase(),
+    );
+    const completedStatuses = allowSandbox
+      ? ['success', 'subscribed', 'active', 'sandbox']
+      : ['success', 'subscribed', 'active'];
     const cancelledStatuses = ['unsubscribed', 'canceled', 'cancelled'];
+
+    if (status === 'sandbox' && !allowSandbox) {
+      return {
+        type: 'ignored',
+        reason: 'LiqPay sandbox payment ignored (set LIQPAY_ALLOW_SANDBOX=1 to accept test payments)',
+      };
+    }
 
     // LiqPay has no event id: payment_id is unique per charge (including each
     // subscription renewal), so it is the idempotency key. order_id + status is

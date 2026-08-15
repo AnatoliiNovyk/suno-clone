@@ -79,10 +79,12 @@ export function ProfilePage() {
     navigate('/');
   };
 
+  // `as const` narrows id to the union activeTab expects, so the click handler
+  // no longer needs an `as any` cast to compile.
   const tabs = [
     { id: 'account', label: 'Акаунт', icon: User },
     { id: 'subscription', label: 'Підписка', icon: CreditCard },
-  ];
+  ] as const;
 
   return (
     <div className="min-h-screen bg-neutral-900 pt-24 pb-12">
@@ -124,7 +126,7 @@ export function ProfilePage() {
                 return (
                   <button
                     key={tab.id}
-                    onClick={() => setActiveTab(tab.id as any)}
+                    onClick={() => setActiveTab(tab.id)}
                     className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-left transition-colors ${
                       activeTab === tab.id
                         ? 'bg-primary-500/10 text-primary-500'

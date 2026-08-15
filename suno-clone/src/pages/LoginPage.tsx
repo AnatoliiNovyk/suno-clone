@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Mail, Lock, Eye, EyeOff, Loader2 } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
+import { errorMessage } from '../lib/errors';
 
 export function LoginPage() {
   const navigate = useNavigate();
@@ -21,8 +22,8 @@ export function LoginPage() {
     try {
       await signIn(email, password);
       navigate('/');
-    } catch (err: any) {
-      setError(err.message || 'Помилка входу');
+    } catch (err: unknown) {
+      setError(errorMessage(err, 'Помилка входу'));
     } finally {
       setLoading(false);
     }
