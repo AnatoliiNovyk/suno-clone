@@ -50,6 +50,15 @@ export interface Subscription {
   current_period_end?: string;
 }
 
+/** A row of the `plans` table — the single source of truth for plan credits.
+ *  Marketing copy (icon, feature bullets) stays in the page; numbers do not. */
+export interface Plan {
+  key: string;
+  name: string;
+  monthly_credits: number;
+  active: boolean;
+}
+
 export interface PlanPrice {
   plan_key: string;
   currency: Currency;

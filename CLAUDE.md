@@ -66,7 +66,9 @@ Provider abstraction lives in `supabase/functions/_shared/payments/`: `provider.
 
 Flow: `PricingPage.tsx` (currency selector UAH/USD/EUR + interval) → `/payment?plan=<id>&interval=<i>&currency=<c>` → `PaymentPage.tsx` (provider choice per currency: UAH → LiqPay; USD/EUR → Stripe or LiqPay) invokes `create-payment` with `{ provider, planKey, currency, interval }` → server verifies the Supabase JWT, derives `userId/email`, loads the fixed price from `plan_prices` (never trusts client amounts) → redirect to the gateway → `payments-webhook?provider=<key>` verifies the signature, **claims the event in `payment_events`** (a provider retry of an already-processed event returns 200 without touching credits; a failed run releases the claim so the next retry re-processes), resolves the profile from signed `user_id` metadata (email only as legacy fallback), and calls `apply_plan_purchase`. Webhook status codes are meaningful: `4xx` = permanent (bad signature, unknown plan), `5xx` = transient (DB/config) — please retry.
 
-Frontend money helpers are in `suno-clone/src/lib/pricing.ts` (`formatMoney`, `PROVIDERS_FOR_CURRENCY`, fallback price table mirroring the SQL seed). Requires `STRIPE_SECRET_KEY`/`STRIPE_WEBHOOK_SECRET` and/or `LIQPAY_PUBLIC_KEY`/`LIQPAY_PRIVATE_KEY`, plus `SITE_URL` for redirects.
+**Renewals** — `checkout.session.completed` fires only for the first payment, so Stripe's later charges arrive as `invoice.paid`. The provider maps those to a `subscription_renewed` event **only** when `billing_reason === 'subscription_cycle'`; `subscription_create` is the first invoice and is ignored because the checkout event already handled it (its event id differs, so idempotency would not catch the double grant). A renewal carries no user metadata — the webhook resolves the owner and plan from our own `subscriptions` row via `provider_subscription_id`. LiqPay needs no special case: each recurring charge posts a fresh `payment_id` with `info` intact, so it flows through the normal `payment_completed` path. A **yearly** interval grants `12 × monthly_credits` at once, because the provider only calls back once per billing period — see `creditsForInterval()` on the frontend, which must stay in step with `apply_plan_purchase`.
+
+Frontend money helpers are in `suno-clone/src/lib/pricing.ts` (`fetchPlans`, `fetchPlanPrices`, `creditsForInterval`, `formatMoney`, `PROVIDERS_FOR_CURRENCY`, fallback plan/price tables mirroring the SQL seed). **Plan names and credit amounts always come from the `plans` table** — `PricingPage`/`PaymentPage` keep only presentation (icon, feature bullets, "recommended") locally, so editing a plan in `/admin/pricing` is reflected everywhere instead of silently disagreeing with the marketing pages. Requires `STRIPE_SECRET_KEY`/`STRIPE_WEBHOOK_SECRET` and/or `LIQPAY_PUBLIC_KEY`/`LIQPAY_PRIVATE_KEY`, plus `SITE_URL` for redirects.
 
 ## Development Workflows
 
@@ -123,7 +125,7 @@ Prefer a **single root `.env`** (see `.env.example`). Vite loads it via `envDir:
 - **UI dependencies** — keep direct dependencies minimal; add UI libraries only when they are actually used by `src/`.
 - **Single-row queries** — use `.maybeSingle()`.
 - **Loading states** — boolean state + spinning Lucide icon (`<Loader2 className="animate-spin" />`).
-- **Credits** — 10 credits per full song, 4 per sample (Lyria 3 Clip); 50 on signup. Plans: `free` / `pro` / `premier`.
+- **Credits** — 10 credits per full song, 4 per sample (Lyria 3 Clip); 50 on signup (a one-off grant — there is no refill job for free accounts). Plans: `free` / `pro` / `premier`, with their credit amounts read from `plans.monthly_credits`, never hardcoded in a page.
 - **TypeScript** — keep shared shapes in `src/types/index.ts`; use the `@/` import alias.
 
 ## Known Gaps / Caveats

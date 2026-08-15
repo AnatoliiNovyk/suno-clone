@@ -38,6 +38,17 @@ export type WebhookEvent =
       providerCustomerId?: string;
       providerSubscriptionId?: string;
     }
+  | {
+      /** A recurring charge on an existing subscription. Carries no user
+       *  metadata — the provider's subscription id is the only link back, so
+       *  the webhook resolves the owner and plan from the subscriptions row. */
+      type: 'subscription_renewed';
+      eventId: string;
+      providerSubscriptionId: string;
+      currency: string;
+      amountMinor: number;
+      interval?: string;
+    }
   | { type: 'subscription_cancelled'; eventId: string; providerSubscriptionId: string }
   | { type: 'ignored'; reason: string };
 

@@ -92,6 +92,34 @@ export const stripeProvider: PaymentProvider = {
         providerSubscriptionId: session.subscription || undefined,
       };
     }
+    // checkout.session.completed only ever fires for the FIRST payment.
+    // Every later charge on the subscription arrives as invoice.paid, which is
+    // why a Pro subscriber used to receive credits exactly once, at signup.
+    // billing_reason discriminates: 'subscription_create' is the first invoice
+    // (already handled by the checkout event above — processing it again would
+    // double-grant, and its event id is different so idempotency would not
+    // catch it), while 'subscription_cycle' is a genuine renewal.
+    if (event.type === 'invoice.paid' || event.type === 'invoice.payment_succeeded') {
+      const invoice = event.data?.object ?? {};
+      const reason = invoice.billing_reason;
+      if (reason !== 'subscription_cycle') {
+        return { type: 'ignored', reason: `Stripe invoice with billing_reason=${reason}` };
+      }
+      const subscriptionId = invoice.subscription || invoice.parent?.subscription_details?.subscription;
+      if (!subscriptionId) {
+        return { type: 'ignored', reason: 'Stripe invoice without a subscription' };
+      }
+      const line = invoice.lines?.data?.[0];
+      return {
+        type: 'subscription_renewed',
+        eventId,
+        providerSubscriptionId: String(subscriptionId),
+        currency: String(invoice.currency || 'USD').toUpperCase(),
+        amountMinor: invoice.amount_paid ?? invoice.total ?? 0,
+        interval: line?.price?.recurring?.interval || line?.plan?.interval || undefined,
+      };
+    }
+
     if (event.type === 'customer.subscription.deleted') {
       return {
         type: 'subscription_cancelled',

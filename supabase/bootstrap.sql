@@ -245,10 +245,12 @@ REVOKE ALL ON FUNCTION adjust_credits(UUID, INTEGER, TEXT, TEXT) FROM PUBLIC, an
 -- The service role (Python service, webhooks) must still be able to call it.
 GRANT EXECUTE ON FUNCTION adjust_credits(UUID, INTEGER, TEXT, TEXT) TO service_role;
 
--- The only way a paid plan is granted: sets the plan, ADDS the plan's monthly
--- credits to the existing balance (never overwrites it), logs the ledger row
--- and upserts the subscription — all in one transaction. Credits always come
--- from plans.monthly_credits, never from the caller.
+-- The only way a paid plan is granted: sets the plan, ADDS credits to the
+-- existing balance (never overwrites it), logs the ledger row and upserts the
+-- subscription — all in one transaction. Credits always come from
+-- plans.monthly_credits, never from the caller. A yearly interval grants
+-- 12 × monthly_credits, because the provider only calls back once per billing
+-- period.
 CREATE OR REPLACE FUNCTION apply_plan_purchase(
     p_user_id UUID,
     p_plan TEXT,
@@ -265,18 +267,24 @@ SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
 DECLARE
-    v_credits INTEGER;
+    v_monthly INTEGER;
+    v_months INTEGER;
+    v_granted INTEGER;
     v_balance INTEGER;
     v_updated BOOLEAN := FALSE;
 BEGIN
-    SELECT monthly_credits INTO v_credits FROM plans WHERE key = p_plan;
-    IF v_credits IS NULL THEN
+    SELECT monthly_credits INTO v_monthly FROM plans WHERE key = p_plan;
+    IF v_monthly IS NULL THEN
         RAISE EXCEPTION 'unknown_plan';
     END IF;
 
+    -- One provider callback covers the whole billing period.
+    v_months := CASE WHEN lower(COALESCE(p_interval, 'month')) = 'year' THEN 12 ELSE 1 END;
+    v_granted := v_monthly * v_months;
+
     UPDATE profiles
     SET plan = p_plan,
-        credits = COALESCE(credits, 0) + v_credits,
+        credits = COALESCE(credits, 0) + v_granted,
         updated_at = NOW()
     WHERE id = p_user_id
     RETURNING credits INTO v_balance;
@@ -288,13 +296,13 @@ BEGIN
     INSERT INTO credit_transactions (user_id, amount, type, description)
     VALUES (
         p_user_id,
-        v_credits,
+        v_granted,
         'plan_purchase',
         format(
-            '%s plan via %s (%s %s / %s)',
+            '%s plan via %s (%s %s / %s, %s month(s))',
             p_plan, p_provider,
             to_char(COALESCE(p_amount_minor, 0)::NUMERIC / 100, 'FM999999990.00'),
-            p_currency, p_interval
+            p_currency, p_interval, v_months
         )
     );
 
@@ -324,7 +332,11 @@ BEGIN
         );
     END IF;
 
-    RETURN jsonb_build_object('credits_granted', v_credits, 'new_balance', v_balance);
+    RETURN jsonb_build_object(
+        'credits_granted', v_granted,
+        'months', v_months,
+        'new_balance', v_balance
+    );
 END;
 $$;
 

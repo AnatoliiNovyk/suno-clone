@@ -133,6 +133,53 @@ Deno.serve(async (req) => {
         `[payments-webhook] ${providerKey}/${event.eventId}: ${event.planKey} for ${profileId}, ` +
           `+${result?.credits_granted ?? '?'} credits → ${result?.new_balance ?? '?'}`,
       );
+    } else if (event.type === 'subscription_renewed') {
+      // A renewal invoice carries no user metadata: our own subscriptions row
+      // is the only link from the provider's subscription id back to an owner.
+      const subResp = await fetch(
+        `${supabaseUrl}/rest/v1/subscriptions` +
+          `?provider=eq.${encodeURIComponent(providerKey)}` +
+          `&provider_subscription_id=eq.${encodeURIComponent(event.providerSubscriptionId)}` +
+          '&select=user_id,plan,interval&limit=1',
+        { headers: restHeaders },
+      );
+      if (!subResp.ok) {
+        throw new WebhookError(500, `Failed to load subscription: ${subResp.status}`);
+      }
+      const [subscription] = await subResp.json();
+      if (!subscription) {
+        throw new WebhookError(
+          400,
+          `Renewal for unknown subscription ${event.providerSubscriptionId}`,
+        );
+      }
+
+      const rpcResp = await fetch(`${supabaseUrl}/rest/v1/rpc/apply_plan_purchase`, {
+        method: 'POST',
+        headers: restHeaders,
+        body: JSON.stringify({
+          p_user_id: subscription.user_id,
+          p_plan: subscription.plan,
+          p_provider: providerKey,
+          p_currency: event.currency,
+          p_amount_minor: event.amountMinor,
+          p_interval: event.interval ?? subscription.interval ?? 'month',
+          p_provider_subscription_id: event.providerSubscriptionId,
+        }),
+      });
+      if (!rpcResp.ok) {
+        const detail = await rpcResp.text();
+        if (detail.includes('unknown_plan')) {
+          throw new WebhookError(400, `Unknown plan on renewal: ${subscription.plan}`);
+        }
+        throw new WebhookError(500, `apply_plan_purchase failed: ${rpcResp.status} ${detail}`);
+      }
+
+      const [result] = await rpcResp.json().then((r: unknown) => (Array.isArray(r) ? r : [r]));
+      console.log(
+        `[payments-webhook] ${providerKey}/${event.eventId}: renewed ${subscription.plan} for ` +
+          `${subscription.user_id}, +${result?.credits_granted ?? '?'} credits`,
+      );
     } else if (event.type === 'subscription_cancelled') {
       if (event.providerSubscriptionId) {
         const cancelResp = await fetch(

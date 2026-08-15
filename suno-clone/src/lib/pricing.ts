@@ -1,5 +1,5 @@
 import { supabase } from './supabase';
-import type { BillingInterval, Currency, PaymentProviderKey, PlanPrice } from '../types';
+import type { BillingInterval, Currency, PaymentProviderKey, Plan, PlanPrice } from '../types';
 
 export const CURRENCIES: Currency[] = ['UAH', 'USD', 'EUR'];
 
@@ -37,6 +37,36 @@ const FALLBACK_PRICES: PlanPrice[] = [
   { plan_key: 'premier', currency: 'EUR', interval: 'year', amount_minor: 21120 },
   { plan_key: 'premier', currency: 'UAH', interval: 'year', amount_minor: 950400 },
 ];
+
+// Same idea as FALLBACK_PRICES: keeps the pricing UI usable before the
+// migration is applied, or if the table is briefly unreachable.
+const FALLBACK_PLANS: Plan[] = [
+  { key: 'free', name: 'Free', monthly_credits: 50, active: true },
+  { key: 'pro', name: 'Pro', monthly_credits: 2500, active: true },
+  { key: 'premier', name: 'Premier', monthly_credits: 10000, active: true },
+];
+
+/** How many credits a purchase of this interval actually grants. A provider
+ *  bills (and calls back) once per period, so a year buys twelve months at
+ *  once — this mirrors `apply_plan_purchase` and must stay in step with it. */
+export function creditsForInterval(monthlyCredits: number, interval: BillingInterval): number {
+  return monthlyCredits * (interval === 'year' ? 12 : 1);
+}
+
+/** Loads active plans; falls back to the built-in copy of the seed data. */
+export async function fetchPlans(): Promise<Plan[]> {
+  try {
+    const { data, error } = await supabase
+      .from('plans')
+      .select('key,name,monthly_credits,active')
+      .eq('active', true)
+      .order('monthly_credits');
+    if (error || !data || data.length === 0) return FALLBACK_PLANS;
+    return data as Plan[];
+  } catch {
+    return FALLBACK_PLANS;
+  }
+}
 
 export function formatMoney(amountMinor: number, currency: Currency): string {
   const major = amountMinor / 100;
