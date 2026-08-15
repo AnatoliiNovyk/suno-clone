@@ -12,5 +12,10 @@ CREATE TABLE tracks (
     likes INTEGER DEFAULT 0,
     plays INTEGER DEFAULT 0,
     status TEXT DEFAULT 'pending',
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    -- Credits actually charged, so the stuck-track reaper refunds the exact
+    -- amount instead of guessing song (10) vs sample (4).
+    generation_cost INTEGER,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    -- Bumped by the tracks_set_updated_at trigger on every write.
+    updated_at TIMESTAMPTZ DEFAULT NOW()
 );

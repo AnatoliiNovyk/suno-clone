@@ -34,6 +34,10 @@ function minorToMajorInput(amountMinor: number): string {
 export function AdminPricingPage() {
   const [forms, setForms] = useState<Record<string, PlanForm>>({});
   const [planOrder, setPlanOrder] = useState<string[]>([]);
+  // Which price cells exist in the database right now, per plan. Clearing a
+  // field has to DELETE its row — skipping the empty ones only left the old
+  // price in place, so it reappeared on the next load.
+  const [savedPriceKeys, setSavedPriceKeys] = useState<Record<string, string[]>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -64,6 +68,7 @@ export function AdminPricingPage() {
     }[];
 
     const next: Record<string, PlanForm> = {};
+    const saved: Record<string, string[]> = {};
     for (const plan of plans) {
       const priceMap: Record<string, string> = {};
       for (const c of CURRENCIES) {
@@ -71,9 +76,11 @@ export function AdminPricingPage() {
           priceMap[priceKey(c, i)] = '';
         }
       }
-      for (const p of prices.filter((p) => p.plan_key === plan.key)) {
+      const planPrices = prices.filter((p) => p.plan_key === plan.key);
+      for (const p of planPrices) {
         priceMap[priceKey(p.currency, p.interval)] = minorToMajorInput(p.amount_minor);
       }
+      saved[plan.key] = planPrices.map((p) => priceKey(p.currency, p.interval));
       next[plan.key] = {
         name: plan.name,
         monthly_credits: String(plan.monthly_credits),
@@ -83,6 +90,7 @@ export function AdminPricingPage() {
     }
 
     setForms(next);
+    setSavedPriceKeys(saved);
     setPlanOrder(plans.map((p) => p.key));
     setLoading(false);
   }, []);
@@ -139,10 +147,20 @@ export function AdminPricingPage() {
         interval: BillingInterval;
         amount_minor: number;
       }[] = [];
+      const clearedCells: { currency: Currency; interval: BillingInterval }[] = [];
+      const filledKeys: string[] = [];
+      const previouslySaved = savedPriceKeys[planKey] ?? [];
+
       for (const c of CURRENCIES) {
         for (const i of INTERVALS) {
-          const raw = form.prices[priceKey(c, i)];
-          if (raw.trim() === '') continue;
+          const cell = priceKey(c, i);
+          const raw = form.prices[cell];
+          if (raw.trim() === '') {
+            // Only worth a DELETE if the row actually exists.
+            if (previouslySaved.includes(cell)) clearedCells.push({ currency: c, interval: i });
+            continue;
+          }
+          filledKeys.push(cell);
           priceRows.push({
             plan_key: planKey,
             currency: c,
@@ -151,6 +169,7 @@ export function AdminPricingPage() {
           });
         }
       }
+
       if (priceRows.length > 0) {
         const { error: priceError } = await supabase
           .from('plan_prices')
@@ -158,6 +177,17 @@ export function AdminPricingPage() {
         if (priceError) throw priceError;
       }
 
+      for (const { currency, interval } of clearedCells) {
+        const { error: deleteError } = await supabase
+          .from('plan_prices')
+          .delete()
+          .eq('plan_key', planKey)
+          .eq('currency', currency)
+          .eq('interval', interval);
+        if (deleteError) throw deleteError;
+      }
+
+      setSavedPriceKeys((prev) => ({ ...prev, [planKey]: filledKeys }));
       setSavedKey(planKey);
     } catch (err) {
       setSaveError((prev) => ({ ...prev, [planKey]: rpcErrorMessage(err) }));

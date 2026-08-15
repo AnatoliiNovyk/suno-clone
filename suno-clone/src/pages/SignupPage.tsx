@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Mail, Lock, Eye, EyeOff, Loader2, Check } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
+import { errorMessage } from '../lib/errors';
 
 export function SignupPage() {
   const navigate = useNavigate();
@@ -32,10 +33,16 @@ export function SignupPage() {
     setLoading(true);
 
     try {
-      await signUp(email, password);
-      setSuccess(true);
-    } catch (err: any) {
-      setError(err.message || 'Помилка реєстрації');
+      const { needsEmailConfirmation } = await signUp(email, password);
+      if (needsEmailConfirmation) {
+        setSuccess(true);
+      } else {
+        // Confirmation is off: Supabase already returned a session, so the user
+        // is signed in. Sending them to the login screen made no sense.
+        navigate('/create');
+      }
+    } catch (err: unknown) {
+      setError(errorMessage(err, 'Помилка реєстрації'));
     } finally {
       setLoading(false);
     }

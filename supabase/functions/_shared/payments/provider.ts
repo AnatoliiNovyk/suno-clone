@@ -26,6 +26,9 @@ export interface CheckoutResult {
 export type WebhookEvent =
   | {
       type: 'payment_completed';
+      /** The provider's own event/payment id — the webhook's idempotency key.
+       *  MUST be unique per delivered event and stable across provider retries. */
+      eventId: string;
       userId?: string;
       email?: string;
       planKey: string;
@@ -35,7 +38,18 @@ export type WebhookEvent =
       providerCustomerId?: string;
       providerSubscriptionId?: string;
     }
-  | { type: 'subscription_cancelled'; providerSubscriptionId: string }
+  | {
+      /** A recurring charge on an existing subscription. Carries no user
+       *  metadata — the provider's subscription id is the only link back, so
+       *  the webhook resolves the owner and plan from the subscriptions row. */
+      type: 'subscription_renewed';
+      eventId: string;
+      providerSubscriptionId: string;
+      currency: string;
+      amountMinor: number;
+      interval?: string;
+    }
+  | { type: 'subscription_cancelled'; eventId: string; providerSubscriptionId: string }
   | { type: 'ignored'; reason: string };
 
 export interface PaymentProvider {

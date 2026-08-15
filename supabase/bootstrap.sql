@@ -6,11 +6,12 @@
 -- CREATE OR REPLACE / DROP POLICY IF EXISTS / ON CONFLICT DO NOTHING).
 --
 -- It recreates everything the app needs:
---   1. Tables (profiles, tracks, credits, subscriptions, plans)
---   2. Functions (is_admin, adjust_credits)
---   3. Row Level Security policies
---   4. Storage buckets (audio — public)
---   5. Seed data (plans + fixed per-currency prices)
+--   1. Tables (profiles, tracks, credits, subscriptions, plans, payment_events)
+--   2. Functions (is_admin, adjust_credits, apply_plan_purchase, admin_*)
+--   3. Row Level Security policies + column-level grants
+--   4. Indexes and foreign keys
+--   5. Storage buckets (audio — public)
+--   6. Seed data (plans + fixed per-currency prices)
 --
 -- After running it, point .env files at the new project:
 --   suno-clone/.env : VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY
@@ -50,8 +51,17 @@ CREATE TABLE IF NOT EXISTS tracks (
     likes INTEGER DEFAULT 0,
     plays INTEGER DEFAULT 0,
     status TEXT DEFAULT 'pending',
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    -- Credits actually charged for this generation, so the stuck-track reaper
+    -- refunds the exact amount instead of guessing song (10) vs sample (4).
+    generation_cost INTEGER,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    -- Bumped by the tracks_set_updated_at trigger on every write: a row that
+    -- stops moving while pending/processing is provably abandoned.
+    updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+-- In case an older tracks table already exists without the lifecycle columns.
+ALTER TABLE tracks ADD COLUMN IF NOT EXISTS generation_cost INTEGER;
+ALTER TABLE tracks ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
 
 CREATE TABLE IF NOT EXISTS credit_transactions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -130,6 +140,18 @@ CREATE TABLE IF NOT EXISTS plan_prices (
     UNIQUE (plan_key, currency, "interval")
 );
 
+-- Webhook idempotency ledger: one row per provider event, claimed before the
+-- event is processed so a provider retry can never grant credits twice.
+CREATE TABLE IF NOT EXISTS payment_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    provider TEXT NOT NULL,             -- 'stripe' | 'liqpay' | ...
+    event_id TEXT NOT NULL,             -- the provider's own event/payment id
+    event_type TEXT,
+    user_id UUID,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (provider, event_id)
+);
+
 -- Audit log of privileged admin-panel actions (written only by the
 -- SECURITY DEFINER admin_* functions).
 CREATE TABLE IF NOT EXISTS admin_actions (
@@ -145,20 +167,53 @@ CREATE TABLE IF NOT EXISTS admin_actions (
 -- 2. FUNCTIONS
 -- ============================================================
 
+-- Every SECURITY DEFINER function pins search_path: without it a caller can
+-- shadow `profiles` / `plans` with a temp table and make the function operate
+-- on their own data (privilege escalation).
+
+-- Keeps tracks.updated_at honest for every writer (service role, admin panel,
+-- future features) — the stuck-track reaper depends on it.
+CREATE OR REPLACE FUNCTION set_updated_at()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+    NEW.updated_at := NOW();
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS tracks_set_updated_at ON tracks;
+CREATE TRIGGER tracks_set_updated_at
+    BEFORE UPDATE ON tracks
+    FOR EACH ROW
+    EXECUTE FUNCTION set_updated_at();
+
 CREATE OR REPLACE FUNCTION is_admin()
 RETURNS BOOLEAN
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
+SET search_path = public, pg_temp
 AS $$
   SELECT EXISTS (SELECT 1 FROM profiles WHERE id = auth.uid() AND role = 'admin');
 $$;
 
--- Atomic credit adjustment (service-role only): eliminates read-modify-write races.
-CREATE OR REPLACE FUNCTION adjust_credits(p_user_id UUID, p_delta INTEGER)
+-- Atomic credit adjustment (service-role only): eliminates read-modify-write
+-- races and records every movement in credit_transactions.
+DROP FUNCTION IF EXISTS adjust_credits(UUID, INTEGER);
+
+CREATE OR REPLACE FUNCTION adjust_credits(
+    p_user_id UUID,
+    p_delta INTEGER,
+    p_type TEXT DEFAULT 'adjustment',
+    p_description TEXT DEFAULT NULL
+)
 RETURNS INTEGER
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = public, pg_temp
 AS $$
 DECLARE
     new_balance INTEGER;
@@ -174,13 +229,121 @@ BEGIN
         RAISE EXCEPTION 'insufficient_credits';
     END IF;
 
+    INSERT INTO credit_transactions (user_id, amount, type, description)
+    VALUES (
+        p_user_id,
+        p_delta,
+        COALESCE(NULLIF(btrim(p_type), ''), 'adjustment'),
+        NULLIF(btrim(COALESCE(p_description, '')), '')
+    );
+
     RETURN new_balance;
 END;
 $$;
 
-REVOKE ALL ON FUNCTION adjust_credits(UUID, INTEGER) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION adjust_credits(UUID, INTEGER, TEXT, TEXT) FROM PUBLIC, anon, authenticated;
 -- The service role (Python service, webhooks) must still be able to call it.
-GRANT EXECUTE ON FUNCTION adjust_credits(UUID, INTEGER) TO service_role;
+GRANT EXECUTE ON FUNCTION adjust_credits(UUID, INTEGER, TEXT, TEXT) TO service_role;
+
+-- The only way a paid plan is granted: sets the plan, ADDS credits to the
+-- existing balance (never overwrites it), logs the ledger row and upserts the
+-- subscription — all in one transaction. Credits always come from
+-- plans.monthly_credits, never from the caller. A yearly interval grants
+-- 12 × monthly_credits, because the provider only calls back once per billing
+-- period.
+CREATE OR REPLACE FUNCTION apply_plan_purchase(
+    p_user_id UUID,
+    p_plan TEXT,
+    p_provider TEXT,
+    p_currency TEXT,
+    p_amount_minor INTEGER,
+    p_interval TEXT,
+    p_provider_customer_id TEXT DEFAULT NULL,
+    p_provider_subscription_id TEXT DEFAULT NULL
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+    v_monthly INTEGER;
+    v_months INTEGER;
+    v_granted INTEGER;
+    v_balance INTEGER;
+    v_updated BOOLEAN := FALSE;
+BEGIN
+    SELECT monthly_credits INTO v_monthly FROM plans WHERE key = p_plan;
+    IF v_monthly IS NULL THEN
+        RAISE EXCEPTION 'unknown_plan';
+    END IF;
+
+    -- One provider callback covers the whole billing period.
+    v_months := CASE WHEN lower(COALESCE(p_interval, 'month')) = 'year' THEN 12 ELSE 1 END;
+    v_granted := v_monthly * v_months;
+
+    UPDATE profiles
+    SET plan = p_plan,
+        credits = COALESCE(credits, 0) + v_granted,
+        updated_at = NOW()
+    WHERE id = p_user_id
+    RETURNING credits INTO v_balance;
+
+    IF v_balance IS NULL THEN
+        RAISE EXCEPTION 'user_not_found';
+    END IF;
+
+    INSERT INTO credit_transactions (user_id, amount, type, description)
+    VALUES (
+        p_user_id,
+        v_granted,
+        'plan_purchase',
+        format(
+            '%s plan via %s (%s %s / %s, %s month(s))',
+            p_plan, p_provider,
+            to_char(COALESCE(p_amount_minor, 0)::NUMERIC / 100, 'FM999999990.00'),
+            p_currency, p_interval, v_months
+        )
+    );
+
+    -- A renewal reuses the provider's subscription id: refresh that row
+    -- instead of piling up duplicates.
+    IF p_provider_subscription_id IS NOT NULL AND btrim(p_provider_subscription_id) <> '' THEN
+        UPDATE subscriptions
+        SET plan = p_plan,
+            currency = p_currency,
+            amount_minor = p_amount_minor,
+            "interval" = p_interval,
+            provider_customer_id = COALESCE(p_provider_customer_id, provider_customer_id),
+            status = 'active'
+        WHERE provider = p_provider
+          AND provider_subscription_id = p_provider_subscription_id;
+        v_updated := FOUND;
+    END IF;
+
+    IF NOT v_updated THEN
+        INSERT INTO subscriptions (
+            user_id, plan, provider, currency, amount_minor, "interval",
+            provider_customer_id, provider_subscription_id, status
+        )
+        VALUES (
+            p_user_id, p_plan, p_provider, p_currency, p_amount_minor, p_interval,
+            p_provider_customer_id, p_provider_subscription_id, 'active'
+        );
+    END IF;
+
+    RETURN jsonb_build_object(
+        'credits_granted', v_granted,
+        'months', v_months,
+        'new_balance', v_balance
+    );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION apply_plan_purchase(UUID, TEXT, TEXT, TEXT, INTEGER, TEXT, TEXT, TEXT)
+    FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION apply_plan_purchase(UUID, TEXT, TEXT, TEXT, INTEGER, TEXT, TEXT, TEXT)
+    TO service_role;
 
 -- --- Admin-panel RPCs: SECURITY DEFINER + internal is_admin() check. ---
 
@@ -188,6 +351,7 @@ CREATE OR REPLACE FUNCTION admin_adjust_credits(p_user_id UUID, p_delta INTEGER,
 RETURNS INTEGER
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = public, pg_temp
 AS $$
 DECLARE
     new_balance INTEGER;
@@ -225,6 +389,7 @@ CREATE OR REPLACE FUNCTION admin_set_plan(p_user_id UUID, p_plan TEXT)
 RETURNS VOID
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = public, pg_temp
 AS $$
 BEGIN
     IF NOT is_admin() THEN
@@ -248,6 +413,7 @@ CREATE OR REPLACE FUNCTION admin_set_role(p_user_id UUID, p_role TEXT)
 RETURNS VOID
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = public, pg_temp
 AS $$
 BEGIN
     IF NOT is_admin() THEN
@@ -290,6 +456,7 @@ ALTER TABLE credit_transactions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE plans ENABLE ROW LEVEL SECURITY;
 ALTER TABLE plan_prices ENABLE ROW LEVEL SECURITY;
 ALTER TABLE admin_actions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE payment_events ENABLE ROW LEVEL SECURITY;
 -- Legacy tables: RLS on with no policies = service-role only (never anon).
 ALTER TABLE suno_plans ENABLE ROW LEVEL SECURITY;
 ALTER TABLE suno_subscriptions ENABLE ROW LEVEL SECURITY;
@@ -311,7 +478,13 @@ GRANT  UPDATE (display_name, avatar_url) ON profiles TO authenticated;
 REVOKE INSERT ON profiles FROM anon, authenticated;
 GRANT  INSERT (id, email, display_name, avatar_url) ON profiles TO authenticated;
 
--- Tracks
+-- Tracks: the RLS policy only picks the row. Without column grants a user
+-- could set their own track to status='completed', point audio_url anywhere,
+-- or inflate likes/plays — generation columns move only through the service
+-- role (the Python service).
+REVOKE UPDATE ON tracks FROM anon, authenticated;
+GRANT  UPDATE (title, is_public, cover_url) ON tracks TO authenticated;
+
 DROP POLICY IF EXISTS "Users can view own tracks" ON tracks;
 CREATE POLICY "Users can view own tracks" ON tracks FOR SELECT USING (auth.uid() = user_id OR is_public = true);
 DROP POLICY IF EXISTS "Users can insert own tracks" ON tracks;
@@ -355,8 +528,96 @@ CREATE POLICY "plan_prices_admin_write" ON plan_prices FOR ALL USING (is_admin()
 DROP POLICY IF EXISTS "admin_actions_admin_select" ON admin_actions;
 CREATE POLICY "admin_actions_admin_select" ON admin_actions FOR SELECT USING (is_admin());
 
+-- Payment events are written only by the service role (the webhook).
+DROP POLICY IF EXISTS "payment_events_admin_select" ON payment_events;
+CREATE POLICY "payment_events_admin_select" ON payment_events FOR SELECT USING (is_admin());
+
 -- ============================================================
--- 4. STORAGE BUCKETS
+-- 4. INDEXES AND FOREIGN KEYS
+-- ============================================================
+
+-- LibraryPage: tracks of one user, newest first.
+CREATE INDEX IF NOT EXISTS tracks_user_created_idx ON tracks (user_id, created_at DESC);
+-- Status polling + /admin/tracks status filter + the stuck-track reaper.
+CREATE INDEX IF NOT EXISTS tracks_status_idx ON tracks (status);
+-- /admin/tracks pagination and the dashboard's 14-day chart.
+CREATE INDEX IF NOT EXISTS tracks_created_idx ON tracks (created_at DESC);
+-- The only query the stuck-track reaper runs.
+CREATE INDEX IF NOT EXISTS tracks_in_flight_idx
+    ON tracks (updated_at)
+    WHERE status IN ('pending', 'processing');
+
+-- User transaction history + dashboard "credits spent" window.
+CREATE INDEX IF NOT EXISTS credit_transactions_user_created_idx
+    ON credit_transactions (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS credit_transactions_created_idx
+    ON credit_transactions (created_at DESC);
+
+-- Subscription lookups: by owner, and by provider ref (renewals/cancellations).
+CREATE INDEX IF NOT EXISTS subscriptions_user_idx ON subscriptions (user_id);
+CREATE INDEX IF NOT EXISTS subscriptions_provider_ref_idx
+    ON subscriptions (provider, provider_subscription_id);
+
+-- Webhook legacy email fallback + admin user search.
+CREATE INDEX IF NOT EXISTS profiles_email_idx ON profiles (email);
+
+-- /admin/audit and payment-event listings.
+CREATE INDEX IF NOT EXISTS admin_actions_created_idx ON admin_actions (created_at DESC);
+CREATE INDEX IF NOT EXISTS payment_events_created_idx ON payment_events (created_at DESC);
+
+-- Foreign keys: without them, deleting an auth user left orphan profiles,
+-- tracks, transactions and subscriptions behind forever. Added NOT VALID so
+-- pre-existing orphans surface as a NOTICE instead of aborting the script;
+-- new rows are enforced immediately either way.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'profiles_id_fkey') THEN
+        ALTER TABLE profiles ADD CONSTRAINT profiles_id_fkey
+            FOREIGN KEY (id) REFERENCES auth.users (id) ON DELETE CASCADE NOT VALID;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'tracks_user_id_fkey') THEN
+        ALTER TABLE tracks ADD CONSTRAINT tracks_user_id_fkey
+            FOREIGN KEY (user_id) REFERENCES profiles (id) ON DELETE CASCADE NOT VALID;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'credit_transactions_user_id_fkey') THEN
+        ALTER TABLE credit_transactions ADD CONSTRAINT credit_transactions_user_id_fkey
+            FOREIGN KEY (user_id) REFERENCES profiles (id) ON DELETE CASCADE NOT VALID;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'subscriptions_user_id_fkey') THEN
+        ALTER TABLE subscriptions ADD CONSTRAINT subscriptions_user_id_fkey
+            FOREIGN KEY (user_id) REFERENCES profiles (id) ON DELETE CASCADE NOT VALID;
+    END IF;
+END $$;
+
+DO $$
+DECLARE
+    v_table TEXT;
+    v_constraint TEXT;
+BEGIN
+    FOREACH v_constraint IN ARRAY ARRAY[
+        'profiles_id_fkey',
+        'tracks_user_id_fkey',
+        'credit_transactions_user_id_fkey',
+        'subscriptions_user_id_fkey'
+    ] LOOP
+        v_table := CASE v_constraint
+            WHEN 'profiles_id_fkey' THEN 'profiles'
+            WHEN 'tracks_user_id_fkey' THEN 'tracks'
+            WHEN 'credit_transactions_user_id_fkey' THEN 'credit_transactions'
+            ELSE 'subscriptions'
+        END;
+        BEGIN
+            EXECUTE format('ALTER TABLE %I VALIDATE CONSTRAINT %I', v_table, v_constraint);
+        EXCEPTION WHEN others THEN
+            RAISE NOTICE
+                'Could not validate %.% — orphan rows present (%). The constraint still guards new rows.',
+                v_table, v_constraint, SQLERRM;
+        END;
+    END LOOP;
+END $$;
+
+-- ============================================================
+-- 5. STORAGE BUCKETS
 -- ============================================================
 
 -- Public bucket for generated music and demo samples.
@@ -374,7 +635,7 @@ CREATE POLICY "audio_public_read" ON storage.objects FOR SELECT
     USING (bucket_id = 'audio');
 
 -- ============================================================
--- 5. SEED DATA
+-- 6. SEED DATA
 -- ============================================================
 
 INSERT INTO plans (key, name, monthly_credits, active) VALUES

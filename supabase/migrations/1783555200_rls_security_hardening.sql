@@ -20,22 +20,35 @@ GRANT  UPDATE (display_name, avatar_url) ON profiles TO authenticated;
 REVOKE INSERT ON profiles FROM anon, authenticated;
 GRANT  INSERT (id, email, display_name, avatar_url) ON profiles TO authenticated;
 
--- 2. merchants: owners can never move their own record out of 'pending' ------
-DROP POLICY IF EXISTS "merchants_owner_update" ON merchants;
-CREATE POLICY "merchants_owner_update" ON merchants FOR UPDATE
-    USING (auth.uid() = owner_user_id AND status = 'pending')
-    WITH CHECK (auth.uid() = owner_user_id AND status = 'pending');
+-- 2-3. merchants / merchant_documents (historical) ---------------------------
+-- The merchant feature was dropped by 1784064000_remove_merchants.sql and its
+-- tables are never created by any migration here, so these statements used to
+-- abort `supabase db push` on a fresh project. Guarded — they no-op when the
+-- tables are absent.
+DO $$
+BEGIN
+    IF to_regclass('public.merchants') IS NULL THEN
+        RAISE NOTICE 'merchants tables absent — skipping merchant policy hardening';
+        RETURN;
+    END IF;
 
-DROP POLICY IF EXISTS "merchants_admin_update" ON merchants;
-CREATE POLICY "merchants_admin_update" ON merchants FOR UPDATE
-    USING (is_admin())
-    WITH CHECK (is_admin());
+    -- merchants: owners can never move their own record out of 'pending'.
+    EXECUTE 'DROP POLICY IF EXISTS "merchants_owner_update" ON merchants';
+    EXECUTE 'CREATE POLICY "merchants_owner_update" ON merchants FOR UPDATE
+        USING (auth.uid() = owner_user_id AND status = ''pending'')
+        WITH CHECK (auth.uid() = owner_user_id AND status = ''pending'')';
 
--- 3. merchant_documents: cannot self-mark a document 'accepted' --------------
-DROP POLICY IF EXISTS "merchant_documents_owner_insert" ON merchant_documents;
-CREATE POLICY "merchant_documents_owner_insert" ON merchant_documents FOR INSERT
-    WITH CHECK (status = 'submitted' AND EXISTS (
-        SELECT 1 FROM merchants m WHERE m.id = merchant_id AND m.owner_user_id = auth.uid()));
+    EXECUTE 'DROP POLICY IF EXISTS "merchants_admin_update" ON merchants';
+    EXECUTE 'CREATE POLICY "merchants_admin_update" ON merchants FOR UPDATE
+        USING (is_admin())
+        WITH CHECK (is_admin())';
+
+    -- merchant_documents: cannot self-mark a document 'accepted'.
+    EXECUTE 'DROP POLICY IF EXISTS "merchant_documents_owner_insert" ON merchant_documents';
+    EXECUTE 'CREATE POLICY "merchant_documents_owner_insert" ON merchant_documents FOR INSERT
+        WITH CHECK (status = ''submitted'' AND EXISTS (
+            SELECT 1 FROM merchants m WHERE m.id = merchant_id AND m.owner_user_id = auth.uid()))';
+END $$;
 
 -- 4. legacy suno_* tables: enable RLS (service-role only; no policies) --------
 -- A table with RLS disabled is fully reachable via the public anon key.
@@ -43,7 +56,20 @@ ALTER TABLE IF EXISTS suno_plans         ENABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS suno_subscriptions ENABLE ROW LEVEL SECURITY;
 
 -- 5. guarantee the atomic credit RPC is callable by the service role ---------
-GRANT EXECUTE ON FUNCTION adjust_credits(UUID, INTEGER) TO service_role;
+-- Guarded: 1786665600_payments_credits_integrity.sql replaces this function
+-- with a 4-argument version, so the 2-argument signature may no longer exist.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_proc p
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = 'public'
+          AND p.proname = 'adjust_credits'
+          AND pg_get_function_identity_arguments(p.oid) = 'p_user_id uuid, p_delta integer'
+    ) THEN
+        EXECUTE 'GRANT EXECUTE ON FUNCTION adjust_credits(UUID, INTEGER) TO service_role';
+    END IF;
+END $$;
 
 -- 6. audio bucket: drop any public write policies, keep public read only ------
 DROP POLICY IF EXISTS "Public Upload for audio" ON storage.objects;

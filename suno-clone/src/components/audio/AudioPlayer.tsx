@@ -1,23 +1,35 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Play, Pause, SkipBack, SkipForward, Volume2, VolumeX } from 'lucide-react';
+import { Play, Pause, SkipBack, SkipForward, Volume2, VolumeX, X } from 'lucide-react';
 import { ExportMenu } from '../ui/ExportMenu';
 import type { Track } from '../../types';
 
 interface AudioPlayerProps {
   track: Track | null;
   onClose?: () => void;
+  /** Omit to disable the corresponding skip button (e.g. single-track views). */
+  onPrevious?: () => void;
+  onNext?: () => void;
 }
 
-export function AudioPlayer({ track, onClose }: AudioPlayerProps) {
+const DEFAULT_VOLUME = 0.7;
+
+export function AudioPlayer({ track, onClose, onPrevious, onNext }: AudioPlayerProps) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [volume, setVolume] = useState(0.7);
+  const [volume, setVolume] = useState(DEFAULT_VOLUME);
   const [isMuted, setIsMuted] = useState(false);
   const [playbackError, setPlaybackError] = useState<string | null>(null);
 
   const isPlayable = Boolean(track?.audio_url) && track?.status === 'completed';
+
+  // The source, not the object. Library polling hands us a freshly deserialized
+  // row every 2.5s while any track is generating; keying the reload effect on
+  // `track` meant load() fired on every poll, resetting playback to 0 and
+  // pausing. Only an actual change of track or of its audio warrants a reload.
+  const trackId = track?.id;
+  const audioSrc = track?.audio_url;
 
   useEffect(() => {
     if (audioRef.current) {
@@ -26,14 +38,15 @@ export function AudioPlayer({ track, onClose }: AudioPlayerProps) {
   }, [volume, isMuted]);
 
   useEffect(() => {
-    if (track && audioRef.current) {
+    setIsPlaying(false);
+    setCurrentTime(0);
+    setDuration(0);
+    setPlaybackError(null);
+    // load() on a src-less <audio> fires a spurious error event.
+    if (audioRef.current && audioSrc) {
       audioRef.current.load();
-      setIsPlaying(false);
-      setCurrentTime(0);
-      setDuration(0);
-      setPlaybackError(null);
     }
-  }, [track]);
+  }, [trackId, audioSrc]);
 
   const togglePlay = async () => {
     const audio = audioRef.current;
@@ -70,9 +83,9 @@ export function AudioPlayer({ track, onClose }: AudioPlayerProps) {
   };
 
   const handleLoadedMetadata = () => {
-    if (audioRef.current) {
-      setDuration(audioRef.current.duration);
-    }
+    const value = audioRef.current?.duration;
+    // A stream of unknown length reports Infinity, which formatTime cannot render.
+    setDuration(Number.isFinite(value) ? (value as number) : 0);
   };
 
   const handleAudioError = () => {
@@ -100,7 +113,25 @@ export function AudioPlayer({ track, onClose }: AudioPlayerProps) {
     }
   };
 
+  // Dragging the slider is an explicit request to hear something: while muted
+  // the change used to be swallowed, because the slider renders 0 when muted.
+  const handleVolumeChange = (value: number) => {
+    setVolume(value);
+    setIsMuted(value === 0);
+  };
+
+  const toggleMute = () => {
+    if (!isMuted) {
+      setIsMuted(true);
+      return;
+    }
+    setIsMuted(false);
+    // Unmuting a slider that sits at 0 would stay silent.
+    if (volume === 0) setVolume(DEFAULT_VOLUME);
+  };
+
   const formatTime = (time: number) => {
+    if (!Number.isFinite(time) || time < 0) return '0:00';
     const mins = Math.floor(time / 60);
     const secs = Math.floor(time % 60);
     return `${mins}:${secs.toString().padStart(2, '0')}`;
@@ -145,12 +176,16 @@ export function AudioPlayer({ track, onClose }: AudioPlayerProps) {
         <div className="flex-1 flex flex-col items-center gap-2">
           <div className="flex items-center gap-4">
             <button
-              className="p-2 text-neutral-100 hover:text-neutral-50 transition-colors"
+              type="button"
+              onClick={onPrevious}
+              disabled={!onPrevious}
+              className="p-2 text-neutral-100 hover:text-neutral-50 disabled:opacity-30 disabled:hover:text-neutral-100 transition-colors"
               aria-label="Попередній трек"
             >
               <SkipBack className="w-5 h-5" />
             </button>
             <button
+              type="button"
               onClick={togglePlay}
               disabled={!isPlayable}
               aria-label={isPlayable ? (isPlaying ? 'Пауза' : 'Відтворити') : 'Трек ще не готовий'}
@@ -164,7 +199,10 @@ export function AudioPlayer({ track, onClose }: AudioPlayerProps) {
               {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5 ml-0.5" />}
             </button>
             <button
-              className="p-2 text-neutral-100 hover:text-neutral-50 transition-colors"
+              type="button"
+              onClick={onNext}
+              disabled={!onNext}
+              className="p-2 text-neutral-100 hover:text-neutral-50 disabled:opacity-30 disabled:hover:text-neutral-100 transition-colors"
               aria-label="Наступний трек"
             >
               <SkipForward className="w-5 h-5" />
@@ -209,7 +247,9 @@ export function AudioPlayer({ track, onClose }: AudioPlayerProps) {
         {/* Volume */}
         <div className="hidden sm:flex items-center gap-2 w-32">
           <button
-            onClick={() => setIsMuted(!isMuted)}
+            type="button"
+            onClick={toggleMute}
+            aria-label={isMuted ? 'Увімкнути звук' : 'Вимкнути звук'}
             className="p-2 text-neutral-100 hover:text-neutral-50 transition-colors"
           >
             {isMuted ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
@@ -220,11 +260,24 @@ export function AudioPlayer({ track, onClose }: AudioPlayerProps) {
             max="1"
             step="0.01"
             value={isMuted ? 0 : volume}
-            onChange={(e) => setVolume(parseFloat(e.target.value))}
+            onChange={(e) => handleVolumeChange(parseFloat(e.target.value))}
             aria-label="Гучність"
             className="flex-1 h-1 bg-neutral-500 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-neutral-50"
           />
         </div>
+
+        {/* Close — the prop was always passed but the player had no way to be
+            dismissed. */}
+        {onClose && (
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Закрити плеєр"
+            className="p-2 text-neutral-100 hover:text-neutral-50 transition-colors flex-shrink-0"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        )}
       </div>
     </div>
   );

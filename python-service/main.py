@@ -5,6 +5,8 @@ import struct
 import time
 import traceback
 import uuid
+from contextlib import asynccontextmanager, suppress
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
@@ -31,6 +33,32 @@ LYRIA_SAMPLE_MODEL = "lyria-3-clip-preview"
 GENERATION_COST = {"song": 10, "sample": 4}
 MODEL_BY_MODE = {"song": LYRIA_MODEL, "sample": LYRIA_SAMPLE_MODEL}
 
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name) or default)
+    except ValueError:
+        print(f"WARNING: {name} is not a number, falling back to {default}")
+        return default
+    return value if value > 0 else default
+
+
+# Stuck-track reaper. A generation can legitimately take up to ~20 minutes
+# (600s create timeout + 600s polling deadline + upload), so the threshold sits
+# comfortably above that — anything older is provably abandoned.
+GENERATION_STUCK_AFTER_SECONDS = _int_env("GENERATION_STUCK_AFTER_SECONDS", 1800)
+GENERATION_REAPER_INTERVAL_SECONDS = _int_env("GENERATION_REAPER_INTERVAL_SECONDS", 300)
+
+# Boot even when the configuration is incomplete, reporting "degraded" on GET /
+# instead of refusing to start. Off by default: failing fast surfaces a bad
+# deploy immediately rather than serving 500s. /generate-music re-checks the
+# configuration before charging anyone, so a degraded process never bills.
+ALLOW_DEGRADED_START = (os.getenv("ALLOW_DEGRADED_START") or "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
 # CORS: comma-separated origins, or "*" for wide-open (dev only).
 _cors_raw = (os.getenv("CORS_ORIGINS") or "http://localhost:5173,http://localhost:4173,http://127.0.0.1:5173").strip()
 if _cors_raw == "*":
@@ -47,16 +75,8 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
 if not SUPABASE_ANON_KEY:
     print("WARNING: SUPABASE_ANON_KEY missing — JWT verification will fail")
 
-# Initialize FastAPI
-app = FastAPI(title="suno-clone-python-proxy")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=CORS_ORIGINS,
-    allow_credentials=CORS_CREDENTIALS,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# FastAPI is created further down, once the config check and the stuck-track
+# reaper it needs for its lifespan handler are defined.
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -95,6 +115,40 @@ class SimpleSupabaseClient:
             )
             resp.raise_for_status()
             return resp.json()[0]
+
+    async def list_stuck_tracks(self, cutoff_iso, limit=100):
+        """In-flight tracks that stopped moving before cutoff_iso.
+
+        Backed by the tracks_in_flight_idx partial index.
+        """
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(
+                f"{self.url}/rest/v1/tracks"
+                f"?status=in.(pending,processing)"
+                f"&updated_at=lt.{cutoff_iso}"
+                f"&select=id,user_id,generation_cost"
+                f"&order=updated_at.asc&limit={limit}",
+                headers=self.headers,
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    async def fail_stuck_track(self, track_id):
+        """Conditionally move a track out of pending/processing into failed.
+
+        Compare-and-swap: the status filter is part of the request, so only the
+        caller that actually flipped the row gets a row back. An empty result
+        means somebody else won (a background task that finished after all, or
+        a second reaper) and the caller must NOT refund.
+        """
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.patch(
+                f"{self.url}/rest/v1/tracks?id=eq.{track_id}&status=in.(pending,processing)",
+                headers={**self.headers, "Prefer": "return=representation"},
+                json={"status": "failed"},
+            )
+            resp.raise_for_status()
+            return resp.json()
 
     async def get_profile(self, user_id):
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -136,8 +190,12 @@ class SimpleSupabaseClient:
                 resp.raise_for_status()
             return resp
 
-    async def adjust_credits(self, user_id, delta):
+    async def adjust_credits(self, user_id, delta, tx_type="adjustment", description=None):
         """Atomically adjust the user's credits via the adjust_credits RPC.
+
+        The RPC also writes a credit_transactions row from tx_type/description,
+        which is what the admin dashboard and the user's history read — never
+        move credits by any other path.
 
         Returns the new balance. Raises InsufficientCreditsError when the
         adjustment would drive the balance below zero.
@@ -146,7 +204,12 @@ class SimpleSupabaseClient:
             resp = await client.post(
                 f"{self.url}/rest/v1/rpc/adjust_credits",
                 headers=self.headers,
-                json={"p_user_id": user_id, "p_delta": delta},
+                json={
+                    "p_user_id": user_id,
+                    "p_delta": delta,
+                    "p_type": tx_type,
+                    "p_description": description,
+                },
             )
             if resp.status_code == 400 and "insufficient_credits" in resp.text:
                 raise InsufficientCreditsError()
@@ -240,11 +303,114 @@ def is_service_ready() -> tuple[bool, str | None]:
     return True, None
 
 
-@app.on_event("startup")
-async def startup_validate_configuration():
+async def reap_stuck_tracks() -> int:
+    """Fail and refund generations that no background task can finish any more.
+
+    Generation runs in a FastAPI BackgroundTask, which dies with the process.
+    Without this sweep a restart mid-generation leaves the row in
+    pending/processing forever: the user is out the credits, and the library
+    polls that row every 2.5s for as long as the page is open.
+
+    Returns the number of tracks recovered.
+    """
+    if not supabase_client:
+        return 0
+
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=GENERATION_STUCK_AFTER_SECONDS)
+    try:
+        stuck = await supabase_client.list_stuck_tracks(cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    except Exception:
+        print(f"[Reaper] Could not list stuck tracks: {traceback.format_exc()}")
+        return 0
+
+    recovered = 0
+    for track in stuck:
+        track_id = track.get("id")
+        try:
+            claimed = await supabase_client.fail_stuck_track(track_id)
+        except Exception:
+            print(f"[Reaper] Could not fail track {track_id}: {traceback.format_exc()}")
+            continue
+
+        # Lost the race — whoever won owns the refund (or already completed it).
+        if not claimed:
+            continue
+
+        recovered += 1
+        user_id = track.get("user_id")
+        cost = track.get("generation_cost")
+        if not user_id or not cost:
+            # Charged before generation_cost was recorded: refunding a guessed
+            # amount is worse than leaving it to a human. Adjust the balance
+            # from /admin/users/:id — that path writes an audit row.
+            print(
+                f"[Reaper] Track {track_id} timed out and was marked failed; "
+                f"charged amount unknown, NOT refunded — settle it in the admin panel"
+            )
+            continue
+
+        try:
+            await supabase_client.adjust_credits(
+                user_id,
+                cost,
+                tx_type="refund",
+                description=f"refund — generation timed out (track {track_id})",
+            )
+            print(f"[Reaper] Track {track_id} timed out; refunded {cost} credits to {user_id}")
+        except Exception:
+            print(
+                f"[CRITICAL] Refund of {cost} credits FAILED for user {user_id} "
+                f"(stuck track {track_id}): {traceback.format_exc()}"
+            )
+
+    return recovered
+
+
+async def _reaper_loop():
+    """Sweeps immediately (a restart is exactly when tracks get orphaned), then
+    on a fixed interval."""
+    while True:
+        try:
+            recovered = await reap_stuck_tracks()
+            if recovered:
+                print(f"[Reaper] Recovered {recovered} stuck track(s)")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            print(f"[Reaper] Sweep failed: {traceback.format_exc()}")
+        await asyncio.sleep(GENERATION_REAPER_INTERVAL_SECONDS)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
     ready, reason = is_service_ready()
     if not ready:
-        raise RuntimeError(f"Server misconfigured: {reason}")
+        if not ALLOW_DEGRADED_START:
+            raise RuntimeError(
+                f"Server misconfigured: {reason}. "
+                "Set ALLOW_DEGRADED_START=1 to boot anyway and report 'degraded' on GET /."
+            )
+        print(f"WARNING: starting in degraded mode — {reason}")
+
+    reaper = asyncio.create_task(_reaper_loop()) if ready else None
+    try:
+        yield
+    finally:
+        if reaper:
+            reaper.cancel()
+            with suppress(asyncio.CancelledError):
+                await reaper
+
+
+app = FastAPI(title="suno-clone-python-proxy", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=CORS_CREDENTIALS,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 _AUDIO_EXT_BY_MIME = {
@@ -502,7 +668,12 @@ async def generate_music_task(
             except Exception:
                 print(f"[Error] Failed to mark track {track_id} as failed: {traceback.format_exc()}")
             try:
-                await supabase_client.adjust_credits(user_id, cost)
+                await supabase_client.adjust_credits(
+                    user_id,
+                    cost,
+                    tx_type="refund",
+                    description=f"refund for failed generation (track {track_id})",
+                )
             except Exception:
                 print(
                     f"[CRITICAL] Refund of {cost} credits FAILED for user {user_id} "
@@ -530,15 +701,23 @@ async def generate_music_endpoint(
         raise HTTPException(status_code=400, detail="mode must be 'song' or 'sample'")
     cost = GENERATION_COST[mode]
 
+    # The track id is minted before the charge so the ledger row can name the
+    # track it paid for.
+    track_id = str(uuid.uuid4())
+
     try:
-        credits_remaining = await supabase_client.adjust_credits(user_id, -cost)
+        credits_remaining = await supabase_client.adjust_credits(
+            user_id,
+            -cost,
+            tx_type="generation",
+            description=f"{mode} generation via {MODEL_BY_MODE[mode]} (track {track_id})",
+        )
     except InsufficientCreditsError:
         raise HTTPException(status_code=402, detail="Insufficient credits")
     except Exception as e:
         print(f"Error deducting credits: {e}")
         raise HTTPException(status_code=500, detail="Failed to deduct credits")
 
-    track_id = str(uuid.uuid4())
     prompt = (request.prompt or "").strip()
     genre = (request.genre or "pop").strip() or "pop"
     title = (request.title or "").strip()[:100]
@@ -552,6 +731,9 @@ async def generate_music_endpoint(
             "status": "pending",
             "is_public": False,
             "duration": 0,
+            # What this generation cost, so the reaper can refund the exact
+            # amount if the background task never finishes.
+            "generation_cost": cost,
         }
         if request.lyrics and request.lyrics.strip():
             track_data["lyrics"] = request.lyrics.strip()
@@ -559,7 +741,12 @@ async def generate_music_endpoint(
     except Exception as e:
         print(f"Error creating track: {e}")
         try:
-            await supabase_client.adjust_credits(user_id, cost)
+            await supabase_client.adjust_credits(
+                user_id,
+                cost,
+                tx_type="refund",
+                description=f"refund — track record could not be created ({track_id})",
+            )
         except Exception:
             print(
                 f"[CRITICAL] Refund failed for user {user_id} after track-create error: "
@@ -618,6 +805,9 @@ async def admin_delete_track(track_id: str, _admin: dict = Depends(require_admin
 
 @app.get("/")
 def health_check():
+    """Health check. `degraded` is only ever observable when the process was
+    started with ALLOW_DEGRADED_START=1 — otherwise a bad configuration stops
+    the service at boot and there is nothing here to answer."""
     ready, reason = is_service_ready()
     return {
         "status": "ok" if ready else "degraded",

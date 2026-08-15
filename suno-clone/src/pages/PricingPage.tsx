@@ -1,34 +1,35 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Check, Sparkles, Zap, Crown } from 'lucide-react';
+import { Check, Sparkles, Zap, Crown, Loader2 } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
-import { CURRENCIES, fetchPlanPrices, findPrice, formatMoney } from '../lib/pricing';
-import type { BillingInterval, Currency, PlanPrice } from '../types';
+import {
+  CURRENCIES,
+  creditsForInterval,
+  fetchPlanPrices,
+  fetchPlans,
+  findPrice,
+  formatMoney,
+} from '../lib/pricing';
+import type { BillingInterval, Currency, Plan, PlanPrice } from '../types';
 
-// Marketing copy stays local; money comes from the plan_prices table.
-const plans = [
-  {
-    id: 'free',
-    name: 'Free',
+// Marketing copy stays local; every number — name, credits, money — comes from
+// the plans / plan_prices tables, so editing a plan in /admin/pricing is
+// reflected here instead of silently disagreeing with it.
+interface PlanPresentation {
+  icon: typeof Sparkles;
+  features: string[];
+  recommended?: boolean;
+}
+
+const PLAN_PRESENTATION: Record<string, PlanPresentation> = {
+  free: {
     icon: Sparkles,
-    credits: 50,
-    creditsInterval: 'день',
-    features: [
-      '50 кредитів на день',
-      'Базова генерація музики',
-      'Стандартна якість',
-      'Водяний знак',
-    ],
+    features: ['Базова генерація музики', 'Стандартна якість', 'Водяний знак'],
   },
-  {
-    id: 'pro',
-    name: 'Pro',
+  pro: {
     icon: Zap,
-    credits: 2500,
-    creditsInterval: 'місяць',
     recommended: true,
     features: [
-      '2500 кредитів на місяць',
       'Розширена генерація',
       'Висока якість аудіо',
       'Без водяного знаку',
@@ -36,14 +37,9 @@ const plans = [
       'Пріоритетна черга',
     ],
   },
-  {
-    id: 'premier',
-    name: 'Premier',
+  premier: {
     icon: Crown,
-    credits: 10000,
-    creditsInterval: 'місяць',
     features: [
-      '10000 кредитів на місяць',
       'Повний доступ до функцій',
       'Найвища якість аудіо',
       'Без водяного знаку',
@@ -53,7 +49,9 @@ const plans = [
       'Персональна підтримка',
     ],
   },
-];
+};
+
+const DEFAULT_PRESENTATION: PlanPresentation = { icon: Sparkles, features: [] };
 
 export function PricingPage() {
   const navigate = useNavigate();
@@ -61,9 +59,11 @@ export function PricingPage() {
   const [billingInterval, setBillingInterval] = useState<BillingInterval>('month');
   const [currency, setCurrency] = useState<Currency>('UAH');
   const [prices, setPrices] = useState<PlanPrice[]>([]);
+  const [plans, setPlans] = useState<Plan[] | null>(null);
 
   useEffect(() => {
     fetchPlanPrices().then(setPrices);
+    fetchPlans().then(setPlans);
   }, []);
 
   const handleSelectPlan = (planId: string) => {
@@ -132,23 +132,30 @@ export function PricingPage() {
         </div>
 
         {/* Pricing Cards */}
+        {!plans ? (
+          <div className="flex items-center justify-center py-20">
+            <Loader2 className="w-8 h-8 text-primary-500 animate-spin" />
+          </div>
+        ) : (
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 lg:gap-8">
           {plans.map((plan) => {
-            const Icon = plan.icon;
-            const priceRow = findPrice(prices, plan.id, currency, billingInterval);
-            const isFree = plan.id === 'free';
-            const isCurrentPlan = user?.plan === plan.id;
+            const presentation = PLAN_PRESENTATION[plan.key] ?? DEFAULT_PRESENTATION;
+            const Icon = presentation.icon;
+            const priceRow = findPrice(prices, plan.key, currency, billingInterval);
+            const isFree = plan.key === 'free';
+            const isCurrentPlan = user?.plan === plan.key;
+            const grantedCredits = creditsForInterval(plan.monthly_credits, billingInterval);
 
             return (
               <div
-                key={plan.id}
+                key={plan.key}
                 className={`relative bg-neutral-700/50 rounded-2xl border p-6 lg:p-8 ${
-                  plan.recommended
+                  presentation.recommended
                     ? 'border-primary-500 scale-105 shadow-glow-orange'
                     : 'border-white/10'
                 }`}
               >
-                {plan.recommended && (
+                {presentation.recommended && (
                   <div className="absolute -top-3 left-1/2 -translate-x-1/2">
                     <span className="px-4 py-1 bg-primary-500 text-white text-xs font-semibold rounded-full">
                       Рекомендовано
@@ -176,12 +183,26 @@ export function PricingPage() {
 
                 <div className="mb-6">
                   <span className="text-sm text-neutral-100">
-                    {plan.credits.toLocaleString()} кредитів / {plan.creditsInterval}
+                    {isFree ? (
+                      // Free credits are a one-off signup grant, not a refill —
+                      // there is no job that tops them up.
+                      <>{plan.monthly_credits.toLocaleString()} кредитів при реєстрації</>
+                    ) : billingInterval === 'year' ? (
+                      <>
+                        {grantedCredits.toLocaleString()} кредитів одразу
+                        <span className="text-neutral-300">
+                          {' '}
+                          ({plan.monthly_credits.toLocaleString()} × 12)
+                        </span>
+                      </>
+                    ) : (
+                      <>{plan.monthly_credits.toLocaleString()} кредитів щомісяця</>
+                    )}
                   </span>
                 </div>
 
                 <ul className="space-y-3 mb-8">
-                  {plan.features.map((feature, index) => (
+                  {presentation.features.map((feature, index) => (
                     <li key={index} className="flex items-start gap-2">
                       <Check className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />
                       <span className="text-sm text-neutral-100">{feature}</span>
@@ -190,12 +211,12 @@ export function PricingPage() {
                 </ul>
 
                 <button
-                  onClick={() => handleSelectPlan(plan.id)}
+                  onClick={() => handleSelectPlan(plan.key)}
                   disabled={isCurrentPlan}
                   className={`w-full py-3 rounded-full font-semibold transition-all ${
                     isCurrentPlan
                       ? 'bg-neutral-500 text-neutral-300 cursor-not-allowed'
-                      : plan.recommended
+                      : presentation.recommended
                       ? 'bg-gradient-to-r from-[#FF6B35] via-primary-500 to-primary-700 text-white shadow-glow-orange hover:brightness-110'
                       : 'bg-neutral-700 text-neutral-50 border border-white/15 hover:bg-neutral-700/80'
                   }`}
@@ -206,6 +227,7 @@ export function PricingPage() {
             );
           })}
         </div>
+        )}
 
         {/* FAQ */}
         <div className="mt-20 max-w-3xl mx-auto">
@@ -216,7 +238,11 @@ export function PricingPage() {
             {[
               {
                 q: 'Що таке кредити?',
-                a: 'Кредити - це внутрішня валюта для генерації музики. Одна генерація коштує 10 кредитів.'
+                a: 'Кредити - це внутрішня валюта для генерації музики. Повна пісня коштує 10 кредитів, короткий семпл - 4.'
+              },
+              {
+                q: 'Скільки кредитів я отримую?',
+                a: 'При реєстрації - 50 кредитів одноразово. З платним планом кредити нараховуються при кожній оплаті: щомісяця для місячної підписки або одразу за 12 місяців для річної.'
               },
               {
                 q: 'В якій валюті я можу платити?',

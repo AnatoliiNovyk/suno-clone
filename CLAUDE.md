@@ -31,23 +31,28 @@ Both the simple flow (`CreatePage.tsx`) and the advanced flow (`AdvancedPage.tsx
 
 1. Frontend `POST {VITE_GENERATE_API_URL}/generate-music` with `Authorization: Bearer <supabase_jwt>` and body `{ prompt, genre, mode?, title?, seed?, temperature?, vocal_gender?, style_influence?, lyrics?, negative_prompt? }`. Advanced-page knobs: `seed`/`temperature` → `generation_config` (reproducibility + "Weirdness"; a model that rejects `generation_config` falls back to a retry without it), `vocal_gender` ('any'|'male'|'female') and `style_influence` (0–100) are woven into the prompt text by `_build_input_text`.
 2. Service verifies the JWT (`GET {SUPABASE_URL}/auth/v1/user`), ignores spoofed `user_id`, runs preflight (`GOOGLE_AI_API_KEY` + Supabase), and **deducts credits by mode** (`song` = 10 → `lyria-3-pro-preview`, `sample` = 4 → `lyria-3-clip-preview`; see `GENERATION_COST`/`MODEL_BY_MODE`) via `adjust_credits` RPC.
-3. It inserts a `tracks` row with `status: 'pending'`, returns accepted + track, and runs generation in a FastAPI `BackgroundTask`.
+3. It inserts a `tracks` row with `status: 'pending'` and `generation_cost` (the amount just charged), returns accepted + track, and runs generation in a FastAPI `BackgroundTask`.
 4. The background task calls the selected **Lyria 3** model, uploads audio to Storage `generated/{user_id}/{track_id}.{ext}`, sets `completed` (or `failed` + refund of the same amount).
 5. Create page polls track status until terminal; Library polls all pending/processing rows. `refreshUser()` updates credits.
+
+**Stuck-track reaper** — a `BackgroundTask` dies with the process, so a restart mid-generation would strand the row in `pending`/`processing` forever with the credits gone. `reap_stuck_tracks()` runs from the FastAPI **lifespan** handler: once at startup (a restart is exactly when tracks get orphaned) and then every `GENERATION_REAPER_INTERVAL_SECONDS`. It fails anything in flight whose `tracks.updated_at` (maintained by the `tracks_set_updated_at` trigger) is older than `GENERATION_STUCK_AFTER_SECONDS`, and refunds `generation_cost`. The status transition is a compare-and-swap (`PATCH …&status=in.(pending,processing)` with `Prefer: return=representation`) — only the caller that actually flipped the row refunds, so a late-finishing task or a second instance can never double-credit. Rows predating `generation_cost` are failed but **not** refunded; settle those from `/admin/users/:id`.
 
 The service talks to Supabase through `SimpleSupabaseClient` (raw `httpx` REST with the service-role key).
 
 ### Frontend
 
-- `src/App.tsx` — `<BrowserRouter>` → `<AuthProvider>` → `Header` / routed `main` / `Footer`. Routes: `/`, `/create`, `/advanced`, `/library`, `/pricing`, `/payment`, `/hub`, `/profile`, `/login`, `/signup`.
-- **Auth** — `src/contexts/AuthContext.tsx` provides auth state; import `useAuth()` from `src/hooks/useAuth.ts` for `{ user, loading, signIn, signUp, signOut, refreshUser }`. `user` includes `credits` and `plan`. Gate protected actions on `user`; call `refreshUser()` after anything that changes credits.
+- `src/App.tsx` — `<BrowserRouter>` → `<AuthProvider>` → `Header` / routed `main` / `Footer`. Routes: `/`, `/create`, `/advanced`, `/library`, `/pricing`, `/payment`, `/hub`, `/profile`, `/login`, `/signup`, plus `/admin/*` and a `*` catch-all (`NotFoundPage`).
+- **Auth** — `src/contexts/AuthContext.tsx` provides auth state; import `useAuth()` from `src/hooks/useAuth.ts` for `{ user, loading, error, signIn, signUp, signOut, refreshUser }`. `user` includes `credits` and `plan`. Gate protected actions on `user`, but **check `loading` first** — during the initial session fetch `user` is still `null`, and treating that as signed-out bounces real users to `/login`. `error` is set when a session exists but its profile could not be read (retry with `refreshUser()`); surface it instead of rendering an "please sign in" state that is not true. `signUp` resolves to `{ needsEmailConfirmation }` — `false` means Supabase already returned a session and the user is signed in. Call `refreshUser()` after anything that changes credits.
 - **Supabase client** — singleton in `src/lib/supabase.ts`, initialized from `import.meta.env.VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` (throws if missing). Import `{ supabase }`; never re-create the client.
 - **Shared types** — `src/types/index.ts`: `User`, `Track` (`status: 'pending' | 'processing' | 'completed' | 'failed'`), `Subscription`, `PricingPlan`.
 - **Structure** — `pages/` (route views), `components/{layout,audio,ui}/`, `hooks/`, `lib/`, `contexts/`, `types/`. Path alias `@` → `src/` (see `vite.config.ts` / `tsconfig`).
 
 ### Backend (Supabase)
 
-- **Tables** (`supabase/tables/*.sql`): `profiles` (credits, plan, role), `tracks`, `credit_transactions`, `subscriptions` (provider-agnostic: `provider`, `currency`, `amount_minor`, `provider_*_id`), `plans` + `plan_prices` (single source of truth for plan credits and fixed per-currency prices in minor units), plus legacy `suno_plans`/`suno_subscriptions` (vestigial). RLS via `supabase/migrations/` (merchant objects were later dropped by `1784064000_remove_merchants.sql`). Atomic credit moves go through the `adjust_credits(p_user_id, p_delta)` RPC (service-role only) — never read-modify-write `profiles.credits`.
+- **Tables** (`supabase/tables/*.sql`): `profiles` (credits, plan, role), `tracks`, `credit_transactions`, `subscriptions` (provider-agnostic: `provider`, `currency`, `amount_minor`, `provider_*_id`), `plans` + `plan_prices` (single source of truth for plan credits and fixed per-currency prices in minor units), `payment_events` (webhook idempotency: UNIQUE per `provider`+`event_id`), plus legacy `suno_plans`/`suno_subscriptions` (vestigial). RLS via `supabase/migrations/` (merchant objects were later dropped by `1784064000_remove_merchants.sql`; the migrations that referenced them are guarded by `to_regclass()` so `supabase db push` runs from zero).
+- **Credit movement** — exactly two paths, both service-role only, both atomic and both writing a `credit_transactions` ledger row: `adjust_credits(p_user_id, p_delta, p_type, p_description)` for generation charges/refunds and manual top-ups, and `apply_plan_purchase(user, plan, provider, currency, amount_minor, interval, …)` for paid plans (sets the plan, **adds** `plans.monthly_credits` to the balance, upserts the subscription). Never read-modify-write `profiles.credits`, and never grant credits outside these two RPCs.
+- **Definer functions** — every `SECURITY DEFINER` function pins `SET search_path = public, pg_temp`; keep it that way when adding new ones.
+- **Column-level grants** — `profiles` (`display_name`, `avatar_url`) and `tracks` (`title`, `is_public`, `cover_url`) are the only columns `authenticated` may UPDATE. `status`/`audio_url`/`credits`/`plan`/`role`/`likes`/`plays` move only through the service role or a dedicated RPC.
 - **Storage**: public `audio` bucket. Demo assets at `samples/demo-{1..5}.mp3`; generated audio at `generated/{userId}/{trackId}.{ext}` (extension from Lyria 3's returned `mime_type`, e.g. `.wav`).
 - **Edge functions** (Deno, `supabase/functions/`): `create-payment` (JWT-authenticated provider-agnostic checkout), `payments-webhook` (signature-verified webhook for all providers), and legacy-compatible `generate-music` (thin JWT-forwarding proxy to Python).
 
@@ -59,9 +64,11 @@ The service talks to Supabase through `SimpleSupabaseClient` (raw `httpx` REST w
 
 Provider abstraction lives in `supabase/functions/_shared/payments/`: `provider.ts` (the `PaymentProvider` interface + crypto helpers), `stripe.ts` (USD/EUR, real HMAC webhook verification), `liqpay.ts` (UAH/USD/EUR, `base64(sha1(priv+data+priv))` signatures), `index.ts` (registry — adding a gateway = one file + one registry entry).
 
-Flow: `PricingPage.tsx` (currency selector UAH/USD/EUR + interval) → `/payment?plan=<id>&interval=<i>&currency=<c>` → `PaymentPage.tsx` (provider choice per currency: UAH → LiqPay; USD/EUR → Stripe or LiqPay) invokes `create-payment` with `{ provider, planKey, currency, interval }` → server verifies the Supabase JWT, derives `userId/email`, loads the fixed price from `plan_prices` (never trusts client amounts) → redirect to the gateway → `payments-webhook?provider=<key>` verifies the signature, uses signed `user_id` metadata first (email only as legacy fallback), sets `profiles.plan`/`credits`, and inserts a generalized `subscriptions` row.
+Flow: `PricingPage.tsx` (currency selector UAH/USD/EUR + interval) → `/payment?plan=<id>&interval=<i>&currency=<c>` → `PaymentPage.tsx` (provider choice per currency: UAH → LiqPay; USD/EUR → Stripe or LiqPay) invokes `create-payment` with `{ provider, planKey, currency, interval }` → server verifies the Supabase JWT, derives `userId/email`, loads the fixed price from `plan_prices` (never trusts client amounts) → redirect to the gateway → `payments-webhook?provider=<key>` verifies the signature, **claims the event in `payment_events`** (a provider retry of an already-processed event returns 200 without touching credits; a failed run releases the claim so the next retry re-processes), resolves the profile from signed `user_id` metadata (email only as legacy fallback), and calls `apply_plan_purchase`. Webhook status codes are meaningful: `4xx` = permanent (bad signature, unknown plan), `5xx` = transient (DB/config) — please retry.
 
-Frontend money helpers are in `suno-clone/src/lib/pricing.ts` (`formatMoney`, `PROVIDERS_FOR_CURRENCY`, fallback price table mirroring the SQL seed). Requires `STRIPE_SECRET_KEY`/`STRIPE_WEBHOOK_SECRET` and/or `LIQPAY_PUBLIC_KEY`/`LIQPAY_PRIVATE_KEY`, plus `SITE_URL` for redirects.
+**Renewals** — `checkout.session.completed` fires only for the first payment, so Stripe's later charges arrive as `invoice.paid`. The provider maps those to a `subscription_renewed` event **only** when `billing_reason === 'subscription_cycle'`; `subscription_create` is the first invoice and is ignored because the checkout event already handled it (its event id differs, so idempotency would not catch the double grant). A renewal carries no user metadata — the webhook resolves the owner and plan from our own `subscriptions` row via `provider_subscription_id`. LiqPay needs no special case: each recurring charge posts a fresh `payment_id` with `info` intact, so it flows through the normal `payment_completed` path. A **yearly** interval grants `12 × monthly_credits` at once, because the provider only calls back once per billing period — see `creditsForInterval()` on the frontend, which must stay in step with `apply_plan_purchase`.
+
+Frontend money helpers are in `suno-clone/src/lib/pricing.ts` (`fetchPlans`, `fetchPlanPrices`, `creditsForInterval`, `formatMoney`, `PROVIDERS_FOR_CURRENCY`, fallback plan/price tables mirroring the SQL seed). **Plan names and credit amounts always come from the `plans` table** — `PricingPage`/`PaymentPage` keep only presentation (icon, feature bullets, "recommended") locally, so editing a plan in `/admin/pricing` is reflected everywhere instead of silently disagreeing with the marketing pages. Requires `STRIPE_SECRET_KEY`/`STRIPE_WEBHOOK_SECRET` and/or `LIQPAY_PUBLIC_KEY`/`LIQPAY_PRIVATE_KEY`, plus `SITE_URL` for redirects.
 
 ## Development Workflows
 
@@ -101,16 +108,16 @@ supabase db push        # apply tables/ + migrations/
 
 ### Fresh Supabase project (bootstrap)
 
-If the Supabase project is gone or you're starting from scratch, **`supabase/bootstrap.sql`** recreates everything in one shot: paste it into Dashboard → SQL Editor and run. It is idempotent (safe to re-run) and creates all tables, `is_admin()`/`adjust_credits()` functions, RLS policies, the public `audio` storage bucket, and seeds `plans`/`plan_prices`. Afterwards: update both `.env` files with the new project's URL/keys and deploy the edge functions (`create-payment`, `payments-webhook`).
+If the Supabase project is gone or you're starting from scratch, **`supabase/bootstrap.sql`** recreates everything in one shot: paste it into Dashboard → SQL Editor and run. It is idempotent (safe to re-run) and creates all tables, the `is_admin()`/`adjust_credits()`/`apply_plan_purchase()`/`admin_*` functions, RLS policies and column grants, indexes and foreign keys, the public `audio` storage bucket, and seeds `plans`/`plan_prices`. Afterwards: update both `.env` files with the new project's URL/keys and deploy the edge functions (`create-payment`, `payments-webhook`).
 
 ### Environment variables
 
 Prefer a **single root `.env`** (see `.env.example`). Vite loads it via `envDir: '..'` in `suno-clone/vite.config.ts`.
 
 - **Frontend** — `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `VITE_GENERATE_API_URL`.
-- **Python service** — `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `GOOGLE_AI_API_KEY`, `CORS_ORIGINS`.
-- **Edge functions / payments** — plus `SITE_URL`, `STRIPE_*`, `LIQPAY_*`.
-- All `.env` files are git-ignored — **never commit secrets.** Copy from `.env.example`.
+- **Python service** — `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `GOOGLE_AI_API_KEY`, `CORS_ORIGINS`. Optional: `GENERATION_STUCK_AFTER_SECONDS` (default 1800 — must stay above the worst-case generation time of ~20 min), `GENERATION_REAPER_INTERVAL_SECONDS` (default 300), `ALLOW_DEGRADED_START` (default off — the service refuses to boot on incomplete config; set it to `1` to boot anyway and report `degraded` on `GET /` instead).
+- **Edge functions / payments** — plus `SITE_URL`, `PYTHON_SERVICE_URL` (legacy proxy only), `STRIPE_*`, `LIQPAY_*`. `LIQPAY_ALLOW_SANDBOX` is off by default: a LiqPay `sandbox` callback is a *test* payment that moves no money, so it grants nothing unless explicitly opted into.
+- All `.env` files are git-ignored — **never commit secrets.** `.env.example` is the one tracked exception (`!.env.example` in `.gitignore`); keep it in sync when adding a variable.
 
 ## Conventions
 
@@ -118,8 +125,9 @@ Prefer a **single root `.env`** (see `.env.example`). Vite loads it via `envDir:
 - **UI dependencies** — keep direct dependencies minimal; add UI libraries only when they are actually used by `src/`.
 - **Single-row queries** — use `.maybeSingle()`.
 - **Loading states** — boolean state + spinning Lucide icon (`<Loader2 className="animate-spin" />`).
-- **Credits** — 10 credits per full song, 4 per sample (Lyria 3 Clip); 50 on signup. Plans: `free` / `pro` / `premier`.
-- **TypeScript** — keep shared shapes in `src/types/index.ts`; use the `@/` import alias.
+- **Credits** — 10 credits per full song, 4 per sample (Lyria 3 Clip); 50 on signup (a one-off grant — there is no refill job for free accounts). Plans: `free` / `pro` / `premier`, with their credit amounts read from `plans.monthly_credits`, never hardcoded in a page.
+- **TypeScript** — keep shared shapes in `src/types/index.ts`; use the `@/` import alias. `no-unused-vars` and `no-explicit-any` are lint **errors**: prefix a deliberately unused binding with `_`, and reach for `unknown` + `errorMessage()` (`src/lib/errors.ts`) in `catch` blocks rather than `any`. `react-hooks/set-state-in-effect` and `react-hooks/immutability` stay off on purpose — see the comment in `eslint.config.js` before re-enabling.
+- **User input in PostgREST filters** — never interpolate it raw into `.or(...)`; use `likePattern()` / `stripLikeWildcards()` from `src/lib/search.ts`. An unescaped `)` in a search box otherwise terminates the filter expression early.
 
 ## Known Gaps / Caveats
 

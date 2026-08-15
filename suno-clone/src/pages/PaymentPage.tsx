@@ -3,19 +3,17 @@ import { useSearchParams, useNavigate } from 'react-router-dom';
 import { Lock, Check, ArrowLeft, Loader2, ExternalLink } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
 import { supabase } from '../lib/supabase';
+import { errorMessage } from '../lib/errors';
 import {
+  creditsForInterval,
   fetchPlanPrices,
+  fetchPlans,
   findPrice,
   formatMoney,
   PROVIDER_LABEL,
   PROVIDERS_FOR_CURRENCY,
 } from '../lib/pricing';
-import type { BillingInterval, Currency, PaymentProviderKey, PlanPrice } from '../types';
-
-const planDetails: Record<string, { name: string; credits: number }> = {
-  pro: { name: 'Pro', credits: 2500 },
-  premier: { name: 'Premier', credits: 10000 },
-};
+import type { BillingInterval, Currency, PaymentProviderKey, Plan, PlanPrice } from '../types';
 
 export function PaymentPage() {
   const [searchParams] = useSearchParams();
@@ -32,14 +30,19 @@ export function PaymentPage() {
   const availableProviders = PROVIDERS_FOR_CURRENCY[currency];
   const [provider, setProvider] = useState<PaymentProviderKey>(availableProviders[0]);
   const [prices, setPrices] = useState<PlanPrice[]>([]);
+  const [plans, setPlans] = useState<Plan[] | null>(null);
   const [processing, setProcessing] = useState(false);
   const [error, setError] = useState('');
 
-  const plan = planDetails[planId];
+  // Plans come from the database: a hardcoded table here meant any plan added
+  // or renamed in /admin/pricing showed up as "план не знайдено".
+  const plan = plans?.find((p) => p.key === planId);
   const priceRow = findPrice(prices, planId, currency, interval);
+  const grantedCredits = plan ? creditsForInterval(plan.monthly_credits, interval) : 0;
 
   useEffect(() => {
     fetchPlanPrices().then(setPrices);
+    fetchPlans().then(setPlans);
   }, []);
 
   useEffect(() => {
@@ -58,6 +61,15 @@ export function PaymentPage() {
       setError('Оплату скасовано. Ви можете спробувати знову.');
     }
   }, [searchParams, navigate]);
+
+  // Without this the page flashed "план не знайдено" before the plans arrived.
+  if (!plans) {
+    return (
+      <div className="min-h-screen bg-neutral-900 pt-24 flex items-center justify-center">
+        <Loader2 className="w-8 h-8 text-primary-500 animate-spin" />
+      </div>
+    );
+  }
 
   if (!plan) {
     return (
@@ -105,9 +117,9 @@ export function PaymentPage() {
       } else {
         throw new Error('Не вдалося створити сесію оплати');
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Payment error:', err);
-      setError(err.message || 'Помилка обробки платежу. Спробуйте пізніше.');
+      setError(errorMessage(err, 'Помилка обробки платежу. Спробуйте пізніше.'));
       setProcessing(false);
     }
   };
@@ -134,7 +146,11 @@ export function PaymentPage() {
             </div>
             <div className="flex justify-between py-3 border-b border-white/10">
               <span className="text-neutral-100">Кредити</span>
-              <span className="text-neutral-50">{plan.credits.toLocaleString()} / місяць</span>
+              <span className="text-neutral-50">
+                {interval === 'year'
+                  ? `${grantedCredits.toLocaleString()} одразу (${plan.monthly_credits.toLocaleString()} × 12)`
+                  : `${plan.monthly_credits.toLocaleString()} щомісяця`}
+              </span>
             </div>
             <div className="flex justify-between py-3 border-b border-white/10">
               <span className="text-neutral-100">Період</span>
@@ -184,7 +200,9 @@ export function PaymentPage() {
             <h3 className="text-sm font-semibold text-neutral-50 mb-3">Що включено:</h3>
             <ul className="space-y-2">
               {[
-                `${plan.credits.toLocaleString()} кредитів на місяць`,
+                interval === 'year'
+                  ? `${grantedCredits.toLocaleString()} кредитів на рік`
+                  : `${plan.monthly_credits.toLocaleString()} кредитів на місяць`,
                 'Комерційне використання',
                 'Без водяного знаку',
                 'Висока якість аудіо',

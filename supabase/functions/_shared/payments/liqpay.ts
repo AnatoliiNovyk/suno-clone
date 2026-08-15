@@ -95,12 +95,36 @@ export const liqpayProvider: PaymentProvider = {
     }
 
     const status = String(callback.status ?? '');
-    const completedStatuses = ['success', 'subscribed', 'active', 'sandbox'];
+    // 'sandbox' means LiqPay accepted a TEST payment — no money moved. Granting
+    // credits for it in production would hand out paid plans for free the
+    // moment sandbox mode is enabled on the account, so it counts only when
+    // explicitly opted into.
+    const allowSandbox = ['1', 'true', 'yes'].includes(
+      (Deno.env.get('LIQPAY_ALLOW_SANDBOX') ?? '').trim().toLowerCase(),
+    );
+    const completedStatuses = allowSandbox
+      ? ['success', 'subscribed', 'active', 'sandbox']
+      : ['success', 'subscribed', 'active'];
     const cancelledStatuses = ['unsubscribed', 'canceled', 'cancelled'];
+
+    if (status === 'sandbox' && !allowSandbox) {
+      return {
+        type: 'ignored',
+        reason: 'LiqPay sandbox payment ignored (set LIQPAY_ALLOW_SANDBOX=1 to accept test payments)',
+      };
+    }
+
+    // LiqPay has no event id: payment_id is unique per charge (including each
+    // subscription renewal), so it is the idempotency key. order_id + status is
+    // the fallback for callbacks that carry no payment_id.
+    const eventId = callback.payment_id
+      ? `payment:${callback.payment_id}`
+      : `order:${String(callback.order_id ?? '')}:${status}`;
 
     if (completedStatuses.includes(status)) {
       return {
         type: 'payment_completed',
+        eventId,
         userId: info.user_id ? String(info.user_id) : undefined,
         email: String(info.email ?? callback.sender_email ?? ''),
         planKey: String(info.plan_key ?? 'pro'),
@@ -114,6 +138,7 @@ export const liqpayProvider: PaymentProvider = {
     if (cancelledStatuses.includes(status)) {
       return {
         type: 'subscription_cancelled',
+        eventId,
         providerSubscriptionId: String(callback.order_id ?? ''),
       };
     }

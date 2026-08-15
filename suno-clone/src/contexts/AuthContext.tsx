@@ -1,5 +1,5 @@
-import { useEffect, useState, type ReactNode } from 'react';
-import { AuthContext } from './auth-context';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { AuthContext, type SignUpResult } from './auth-context';
 import { supabase } from '../lib/supabase';
 import type { User } from '../types';
 
@@ -43,58 +43,99 @@ async function ensureProfile(userId: string, email: string): Promise<User | null
   return (again as User) ?? null;
 }
 
+const PROFILE_LOAD_ERROR = 'Не вдалося завантажити профіль.';
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const mountedRef = useRef(true);
+  const pendingLoadRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
-  const fetchProfile = async (userId: string, email?: string) => {
-    const profile = await ensureProfile(userId, email || '');
-    if (profile) {
-      setUser(profile);
+  const loadProfile = useCallback(async (userId: string, email?: string) => {
+    try {
+      const profile = await ensureProfile(userId, email || '');
+      if (!mountedRef.current) return;
+      if (profile) {
+        setUser(profile);
+        setError(null);
+      } else {
+        // A live session whose profile we cannot read. Reporting it beats
+        // rendering the app as signed out with no explanation.
+        setUser(null);
+        setError(PROFILE_LOAD_ERROR);
+      }
+    } catch (err) {
+      console.error('Profile load failed:', err);
+      if (!mountedRef.current) return;
+      setUser(null);
+      setError(PROFILE_LOAD_ERROR);
     }
-  };
+  }, []);
 
   useEffect(() => {
+    mountedRef.current = true;
+
     supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session?.user) {
-        fetchProfile(session.user.id, session.user.email || undefined).finally(() =>
-          setLoading(false),
-        );
-      } else {
-        setLoading(false);
+      if (!session?.user) {
+        if (mountedRef.current) setLoading(false);
+        return;
       }
+      loadProfile(session.user.id, session.user.email ?? undefined).finally(() => {
+        if (mountedRef.current) setLoading(false);
+      });
     });
 
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, session) => {
       if (session?.user) {
-        fetchProfile(session.user.id, session.user.email || undefined);
-      } else {
-        setUser(null);
+        const { id, email } = session.user;
+        // Supabase holds an internal lock while this callback runs; awaiting
+        // another client call from inside it can deadlock. Defer to the next
+        // tick instead of calling loadProfile directly.
+        clearTimeout(pendingLoadRef.current);
+        pendingLoadRef.current = setTimeout(() => {
+          void loadProfile(id, email ?? undefined);
+        }, 0);
+        return;
       }
+      setUser(null);
+      setError(null);
     });
 
-    return () => subscription.unsubscribe();
-  }, []);
+    return () => {
+      mountedRef.current = false;
+      clearTimeout(pendingLoadRef.current);
+      subscription.unsubscribe();
+    };
+  }, [loadProfile]);
 
   const signIn = async (email: string, password: string) => {
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) throw error;
+    const { error: signInError } = await supabase.auth.signInWithPassword({ email, password });
+    if (signInError) throw signInError;
   };
 
-  const signUp = async (email: string, password: string) => {
-    const { data, error } = await supabase.auth.signUp({ email, password });
-    if (error) throw error;
+  const signUp = async (email: string, password: string): Promise<SignUpResult> => {
+    const { data, error: signUpError } = await supabase.auth.signUp({ email, password });
+    if (signUpError) throw signUpError;
 
-    if (data.user) {
+    // Without a session the client is still anonymous, so an insert would be
+    // refused by RLS anyway — the handle_new_user trigger owns that case.
+    if (data.user && data.session) {
       await ensureProfile(data.user.id, email);
     }
+
+    return { needsEmailConfirmation: !data.session };
   };
 
   const signOut = async () => {
-    await supabase.auth.signOut();
+    const { error: signOutError } = await supabase.auth.signOut();
+    // Clear locally regardless: a failed network call must not leave the UI
+    // showing a session the user asked to end.
     setUser(null);
+    setError(null);
+    if (signOutError) console.error('Sign out failed:', signOutError);
   };
 
   const refreshUser = async () => {
@@ -102,12 +143,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       data: { session },
     } = await supabase.auth.getSession();
     if (session?.user) {
-      await fetchProfile(session.user.id, session.user.email || undefined);
+      await loadProfile(session.user.id, session.user.email ?? undefined);
     }
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, signIn, signUp, signOut, refreshUser }}>
+    <AuthContext.Provider
+      value={{ user, loading, error, signIn, signUp, signOut, refreshUser }}
+    >
       {children}
     </AuthContext.Provider>
   );

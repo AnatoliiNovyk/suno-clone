@@ -26,10 +26,13 @@ supabase/.env
 supabase/functions/**/vendor/
 supabase/.netlify/
 
-# Env & secrets (Supabase функції очікують конфіг із середовищних змінних)@supabase/functions/generate-music/index.ts#20-25
+# Env & secrets — Supabase functions and the Python service read config from
+# environment variables. .env.example is the documented template and is the
+# one file here that MUST stay tracked.
 .env
 .env.*
 *.env
+!.env.example
 *.local
 *.pem
 *.key
