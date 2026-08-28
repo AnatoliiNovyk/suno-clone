@@ -208,6 +208,7 @@ export function AdvancedPage() {
             value={seed}
             onChange={(e) => setSeed(e.target.value)}
             placeholder="Необов'язково — число для відтворюваності"
+            maxLength={10}
             className={`w-full bg-neutral-700 border rounded-xl px-4 py-3 text-neutral-50 placeholder:text-neutral-300 focus:outline-none ${
               seedValid ? 'border-neutral-500 focus:border-primary-500' : 'border-error'
             }`}
@@ -227,6 +228,7 @@ export function AdvancedPage() {
             onChange={(e) => setPrompt(e.target.value)}
             placeholder="Опиши музику, яку хочеш створити..."
             rows={3}
+            maxLength={400}
             className="w-full bg-neutral-700 border border-neutral-500 rounded-xl px-4 py-3 text-neutral-50 placeholder:text-neutral-300 focus:outline-none focus:border-primary-500 resize-none"
           />
         </div>
@@ -293,6 +295,7 @@ export function AdvancedPage() {
                       onChange={(e) => setLyrics(e.target.value)}
                       placeholder="Введіть текст пісні..."
                       rows={6}
+                      maxLength={5000}
                       className="w-full bg-neutral-700 border border-neutral-500 rounded-xl px-4 py-3 text-neutral-50 placeholder:text-neutral-300 focus:outline-none focus:border-primary-500 resize-none"
                     />
                   )}
@@ -349,6 +352,7 @@ export function AdvancedPage() {
                     if (e.target.value.trim()) setSelectedGenre('');
                   }}
                   placeholder="Або введіть свій стиль: напр. dark synthwave, ukrainian folk rock…"
+                  maxLength={100}
                   className="mt-3 w-full bg-neutral-700 border border-neutral-500 rounded-xl px-3 py-2 text-sm text-neutral-50 placeholder:text-neutral-300 focus:outline-none focus:border-primary-500"
                 />
               </div>
@@ -423,6 +427,7 @@ export function AdvancedPage() {
                   value={negativePrompt}
                   onChange={(e) => setNegativePrompt(e.target.value)}
                   placeholder="Напр. no distortion, no spoken word"
+                  maxLength={500}
                   className="w-full bg-neutral-700 border border-neutral-500 rounded-xl px-3 py-2 text-sm text-neutral-50 placeholder:text-neutral-300 focus:outline-none focus:border-primary-500"
                 />
                 <p className="mt-2 text-xs text-neutral-300">

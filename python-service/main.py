@@ -7,13 +7,13 @@ import traceback
 import uuid
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Literal, Optional
 
 import httpx
 from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
 # Load environment variables from the root .env file
@@ -96,15 +96,29 @@ class SimpleSupabaseClient:
             "Content-Type": "application/json",
         }
 
-    async def update_track_status(self, track_id, updates):
+    async def transition_track_status(self, track_id, from_statuses: tuple[str, ...], updates):
+        """Atomically update a track only while it remains in an expected state.
+
+        An empty response means another worker already moved the track to a
+        terminal state. That worker exclusively owns side effects such as a
+        credit refund.
+        """
+        if not from_statuses:
+            raise ValueError("from_statuses must not be empty")
+
+        status_filter = (
+            f"eq.{from_statuses[0]}"
+            if len(from_statuses) == 1
+            else f"in.({','.join(from_statuses)})"
+        )
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.patch(
-                f"{self.url}/rest/v1/tracks?id=eq.{track_id}",
-                headers=self.headers,
+                f"{self.url}/rest/v1/tracks?id=eq.{track_id}&status={status_filter}",
+                headers={**self.headers, "Prefer": "return=representation"},
                 json=updates,
             )
             resp.raise_for_status()
-            return resp
+            return resp.json()
 
     async def create_track(self, track_data):
         async with httpx.AsyncClient(timeout=60.0) as client:
@@ -141,14 +155,11 @@ class SimpleSupabaseClient:
         means somebody else won (a background task that finished after all, or
         a second reaper) and the caller must NOT refund.
         """
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.patch(
-                f"{self.url}/rest/v1/tracks?id=eq.{track_id}&status=in.(pending,processing)",
-                headers={**self.headers, "Prefer": "return=representation"},
-                json={"status": "failed"},
-            )
-            resp.raise_for_status()
-            return resp.json()
+        return await self.transition_track_status(
+            track_id,
+            ("pending", "processing"),
+            {"status": "failed"},
+        )
 
     async def get_profile(self, user_id):
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -483,22 +494,22 @@ async def _download_audio_uri(uri: str) -> tuple[bytes, str | None]:
 
 
 class GenerateRequest(BaseModel):
-    prompt: str = ""
-    genre: str = "pop"
-    mode: str = "song"  # 'song' (full track) | 'sample' (short clip)
-    title: Optional[str] = None
+    prompt: str = Field(default="", max_length=500)
+    genre: str = Field(default="pop", max_length=100)
+    mode: Literal["song", "sample"] = "song"
+    title: Optional[str] = Field(default=None, max_length=100)
     # Optional decoding seed for reproducibility (same seed + prompt → same track).
-    seed: Optional[int] = None
+    seed: Optional[int] = Field(default=None, ge=1, le=2_147_483_647)
     # Creativity 0.0–1.0 → generation_config.temperature ("Weirdness").
-    temperature: Optional[float] = None
+    temperature: Optional[float] = Field(default=None, ge=0, le=1)
     # 'any' | 'male' | 'female' — woven into the prompt.
-    vocal_gender: Optional[str] = None
+    vocal_gender: Optional[Literal["any", "male", "female"]] = None
     # 0–100 — how strictly to follow the genre; woven into the prompt.
-    style_influence: Optional[int] = None
+    style_influence: Optional[int] = Field(default=None, ge=0, le=100)
     # Optional client hint; ignored if it does not match the JWT subject.
     user_id: Optional[str] = None
-    lyrics: Optional[str] = None
-    negative_prompt: Optional[str] = None
+    lyrics: Optional[str] = Field(default=None, max_length=5000)
+    negative_prompt: Optional[str] = Field(default=None, max_length=500)
 
 
 def _build_input_text(
@@ -595,7 +606,14 @@ async def generate_music_task(
         return
 
     try:
-        await supabase_client.update_track_status(track_id, {"status": "processing"})
+        claimed_processing = await supabase_client.transition_track_status(
+            track_id,
+            ("pending",),
+            {"status": "processing"},
+        )
+        if not claimed_processing:
+            print(f"[Task] Track {track_id} was already settled before generation started")
+            return
 
         from google import genai
 
@@ -655,7 +673,24 @@ async def generate_music_task(
         }
         if generated_lyrics and generated_lyrics.strip():
             updates["lyrics"] = generated_lyrics.strip()
-        await supabase_client.update_track_status(track_id, updates)
+        claimed_completion = await supabase_client.transition_track_status(
+            track_id,
+            ("pending", "processing"),
+            updates,
+        )
+        if not claimed_completion:
+            # The reaper (or another worker) settled the track while audio was
+            # being generated. Do not revive a refunded track or leave an
+            # inaccessible object in Storage.
+            try:
+                await supabase_client.delete_storage_object("audio", file_path)
+            except Exception:
+                print(
+                    f"[WARN] Failed to delete orphaned audio for track {track_id}: "
+                    f"{traceback.format_exc()}"
+                )
+            print(f"[Task] Track {track_id} was already settled; deleted orphaned audio")
+            return
 
         print(f"[Task] Successfully completed track {track_id}")
 
@@ -664,21 +699,29 @@ async def generate_music_task(
 
         if supabase_client:
             try:
-                await supabase_client.update_track_status(track_id, {"status": "failed"})
+                claimed_failure = await supabase_client.transition_track_status(
+                    track_id,
+                    ("pending", "processing"),
+                    {"status": "failed"},
+                )
             except Exception:
                 print(f"[Error] Failed to mark track {track_id} as failed: {traceback.format_exc()}")
-            try:
-                await supabase_client.adjust_credits(
-                    user_id,
-                    cost,
-                    tx_type="refund",
-                    description=f"refund for failed generation (track {track_id})",
-                )
-            except Exception:
-                print(
-                    f"[CRITICAL] Refund of {cost} credits FAILED for user {user_id} "
-                    f"(track {track_id}): {traceback.format_exc()}"
-                )
+            else:
+                if not claimed_failure:
+                    print(f"[Task] Track {track_id} was already settled; refund belongs to another worker")
+                    return
+                try:
+                    await supabase_client.adjust_credits(
+                        user_id,
+                        cost,
+                        tx_type="refund",
+                        description=f"refund for failed generation (track {track_id})",
+                    )
+                except Exception:
+                    print(
+                        f"[CRITICAL] Refund of {cost} credits FAILED for user {user_id} "
+                        f"(track {track_id}): {traceback.format_exc()}"
+                    )
 
 
 @app.post("/generate-music")
@@ -696,9 +739,7 @@ async def generate_music_endpoint(
     if request.user_id and request.user_id != user_id:
         raise HTTPException(status_code=403, detail="user_id does not match authenticated user")
 
-    mode = (request.mode or "song").strip().lower()
-    if mode not in GENERATION_COST:
-        raise HTTPException(status_code=400, detail="mode must be 'song' or 'sample'")
+    mode = request.mode
     cost = GENERATION_COST[mode]
 
     # The track id is minted before the charge so the ledger row can name the

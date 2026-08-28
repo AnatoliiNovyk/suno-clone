@@ -106,6 +106,12 @@ Never commit `.env`. See `.env.example` for the full list.
    ```
    Optional admin: `UPDATE profiles SET role = 'admin' WHERE email = 'you@example.com';`
 
+## Production deployment
+
+Для розгортання в Coolify використовуйте [`docker-compose.coolify.yml`](docker-compose.coolify.yml).
+Повна інструкція, перелік змінних середовища та післяdeploy-перевірки — у
+[`docs/coolify-deployment.md`](docs/coolify-deployment.md).
+
 ## Key Supabase Tables
 
 - `profiles` – stores user metadata and credit balances
