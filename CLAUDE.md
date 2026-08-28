@@ -110,6 +110,10 @@ supabase db push        # apply tables/ + migrations/
 
 If the Supabase project is gone or you're starting from scratch, **`supabase/bootstrap.sql`** recreates everything in one shot: paste it into Dashboard → SQL Editor and run. It is idempotent (safe to re-run) and creates all tables, the `is_admin()`/`adjust_credits()`/`apply_plan_purchase()`/`admin_*` functions, RLS policies and column grants, indexes and foreign keys, the public `audio` storage bucket, and seeds `plans`/`plan_prices`. Afterwards: update both `.env` files with the new project's URL/keys and deploy the edge functions (`create-payment`, `payments-webhook`).
 
+### Production deploy (Coolify / Docker)
+
+**`DEPLOY.md`** is the step-by-step guide: two Coolify applications from this repo — the frontend (`suno-clone/Dockerfile`, Vite build → nginx on :80, SPA fallback in `suno-clone/nginx.conf`) and the Python service (`python-service/Dockerfile`, uvicorn on :8000) — on two subdomains. `VITE_*` are **build args** (inlined at build time); the Python service reads plain env vars (the missing `../.env` is ignored). Set `CORS_ORIGINS` to the frontend origin and `VITE_GENERATE_API_URL` to the API subdomain. Deploy the backend first (the frontend build needs the API URL).
+
 ### Environment variables
 
 Prefer a **single root `.env`** (see `.env.example`). Vite loads it via `envDir: '..'` in `suno-clone/vite.config.ts`.
