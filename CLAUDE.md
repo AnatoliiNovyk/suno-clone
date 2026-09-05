@@ -112,7 +112,9 @@ If the Supabase project is gone or you're starting from scratch, **`supabase/boo
 
 ### Production deploy (Coolify / Docker)
 
-**`DEPLOY.md`** is the step-by-step guide: two Coolify applications from this repo — the frontend (`suno-clone/Dockerfile`, Vite build → nginx on :80, SPA fallback in `suno-clone/nginx.conf`) and the Python service (`python-service/Dockerfile`, uvicorn on :8000) — on two subdomains. `VITE_*` are **build args** (inlined at build time); the Python service reads plain env vars (the missing `../.env` is ignored). Set `CORS_ORIGINS` to the frontend origin and `VITE_GENERATE_API_URL` to the API subdomain. Deploy the backend first (the frontend build needs the API URL).
+**`docs/coolify-deployment.md`** is the step-by-step guide (Ukrainian). The whole stack ships as **one** Coolify *Docker Compose* resource built from this repo — `docker-compose.coolify.yml` with two services: `web` (Vite build via `Dockerfile.frontend` → nginx on :80, config in `deploy/nginx.conf`) and `api` (`python-service/Dockerfile`, uvicorn on :8000).
+
+Only `web` is published: it takes **a single domain** (the site's own, e.g. the apex — no subdomain needed), and nginx proxies `/api/*` to `api:8000`, stripping the prefix. `api` stays internal with **no domain of its own**. Consequently `VITE_GENERATE_API_URL` is pinned to `/api` inside the compose file and must **not** be set in Coolify; `CORS_ORIGINS` is the site origin. Mark only `VITE_*` as **build variables** (they are inlined at build time) — every other value is runtime-only, so secrets never become build args. The compose resource must be created **from the Git repository** (Base Directory `/`, compose location `docker-compose.coolify.yml`); a pasted "empty" compose has no checkout, so the `./python-service` build context does not exist and the build fails with `unable to prepare context: path … not found`.
 
 ### Environment variables
 
