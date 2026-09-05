@@ -36,3 +36,14 @@ Coolify-застосунки на двох піддоменах**, тоді як
   йдуть через `Dockerfile.frontend` + `deploy/nginx.conf`.
 - Документація описує один домен на кореневому імені замість піддоменів і
   попереджає про типову помилку створення compose без Git-джерела.
+
+## Примітка про злиття з `main`
+
+Паралельний коміт у `main` (`Fix Coolify Docker build…`) встиг пропатчити
+`suno-clone/Dockerfile` і `suno-clone/.dockerignore` під pnpm 11. Під час злиття
+видалення цих файлів збережено: у канонічному шляху їх не збирає ніхто —
+`docker-compose.coolify.yml` використовує `Dockerfile.frontend` (контекст `.`,
+кореневий `.dockerignore`) і `python-service/Dockerfile`, а посилалися на них
+лише `DEPLOY.md` та застарілий абзац `CLAUDE.md`, які теж видалено. Фікс
+esbuild у `Dockerfile.frontend`, зняття `${VAR:?…}` у compose і уточнення про
+домен для `api` з `main` — прийнято без змін.
