@@ -5,3 +5,5 @@ dist/
 *.log
 .git
 .vscode/
+# Host .npmrc redirects the pnpm store to /tmp; Docker writes its own.
+.npmrc

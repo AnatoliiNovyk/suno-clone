@@ -6,9 +6,11 @@ RUN npm install -g pnpm@10
 
 # Install deps first for layer caching.
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-RUN pnpm install --frozen-lockfile
+RUN printf '%s\n' 'onlyBuiltDependencies[]=esbuild' 'only-built-dependencies[]=esbuild' > .npmrc \
+  && pnpm install --frozen-lockfile --config.dangerouslyAllowAllBuilds=true
 
 COPY . .
+RUN printf '%s\n' 'onlyBuiltDependencies[]=esbuild' 'only-built-dependencies[]=esbuild' > .npmrc
 
 # VITE_* are inlined at build time — Coolify passes them as build args.
 ARG VITE_SUPABASE_URL

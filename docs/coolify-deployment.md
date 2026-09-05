@@ -12,7 +12,8 @@
 2. Вкажіть Base Directory: `/`, Docker Compose Location:
    `docker-compose.coolify.yml` і гілку для production.
 3. У полі Domains сервісу `web` додайте ваш домен з внутрішнім портом 80:
-   `https://music.example.com:80`. Не додавайте домен до `api`.
+   `https://suno.pp.ua:80`. **Не додавайте домен до `api`** — Coolify тоді
+   вішає Traefik на порт 443 процесу uvicorn, і публічний сайт не піднімається.
 4. Увімкніть автоматичний TLS у Coolify та залиште `api` внутрішнім сервісом.
 5. Додайте змінні нижче. Позначте лише `VITE_*` як **Build Variable**; усі
    інші мають бути лише **Runtime Variable**. Не передавайте секрети як build
